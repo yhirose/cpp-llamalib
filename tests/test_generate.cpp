@@ -109,6 +109,21 @@ TEST_CASE("long prompt tokenization", "[generate]") {
   REQUIRE_NOTHROW(llm.generate(long_prompt));
 }
 
+TEST_CASE("sampler reset produces consistent results", "[generate]") {
+  llamalib::Params params;
+  params.n_ctx = 512;
+  params.max_tokens = 32;
+  params.temperature = 0.0f;  // Greedy for determinism
+  params.n_slots = 1;
+  llamalib::LLM llm(model_path, params);
+
+  // With sampler reset and greedy sampling, repeated calls with the
+  // same prompt should produce identical output.
+  auto result1 = llm.generate("What is 2+2?");
+  auto result2 = llm.generate("What is 2+2?");
+  REQUIRE(result1 == result2);
+}
+
 TEST_CASE("decode failure throws on context overflow", "[generate]") {
   llamalib::Params params;
   params.n_ctx = 256;

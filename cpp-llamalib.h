@@ -124,6 +124,7 @@ private:
 
   std::string run_inference(Slot &slot, const std::string &prompt,
                             int max_tokens) {
+    llama_sampler_reset(slot.smpl.get());
     auto vocab = llama_model_get_vocab(model_.get());
 
     std::vector<llama_token> tokens(prompt.size() + 16);
