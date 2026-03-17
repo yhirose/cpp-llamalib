@@ -32,6 +32,21 @@ TEST_CASE("generate is non-const", "[llm][const]") {
   STATIC_REQUIRE_FALSE(const_has_generate_2<llamalib::LLM>::value);
 }
 
+TEST_CASE("LLM move semantics", "[llm][move]") {
+  STATIC_REQUIRE(std::is_move_constructible_v<llamalib::LLM>);
+  STATIC_REQUIRE(std::is_move_assignable_v<llamalib::LLM>);
+
+  llamalib::Params params;
+  params.n_ctx = 512;
+  params.max_tokens = 16;
+
+  llamalib::LLM original(model_path, params);
+  llamalib::LLM moved(std::move(original));
+
+  auto result = moved.generate("Hello");
+  REQUIRE_FALSE(result.empty());
+}
+
 TEST_CASE("LLM construction", "[llm]") {
   SECTION("valid model loads successfully") {
     REQUIRE_NOTHROW(llamalib::LLM(model_path));

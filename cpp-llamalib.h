@@ -65,10 +65,31 @@ public:
     }
   }
 
-  ~LLM() { detail::backend_free(); }
+  ~LLM() {
+    if (model_) { detail::backend_free(); }
+  }
 
   LLM(const LLM &) = delete;
   LLM &operator=(const LLM &) = delete;
+
+  LLM(LLM &&other) noexcept
+      : params_(other.params_),
+        model_(std::move(other.model_)),
+        slots_(std::move(other.slots_)) {}
+
+  LLM &operator=(LLM &&other) noexcept {
+    if (this != &other) {
+      // Destroy slots before model (contexts reference the model).
+      // No backend_free needed: this is ownership transfer, not destruction.
+      // other's destructor will skip backend_free since other.model_ is null.
+      slots_ = {};
+      model_.reset();
+      params_ = other.params_;
+      model_ = std::move(other.model_);
+      slots_ = std::move(other.slots_);
+    }
+    return *this;
+  }
 
   std::string generate(const std::string &prompt) {
     return generate(prompt, params_.max_tokens);
