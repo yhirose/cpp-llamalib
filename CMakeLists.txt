@@ -73,7 +73,10 @@ target_compile_definitions(tests PRIVATE
 )
 
 # Register tests with CTest
-list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)
-include(CTest)
-include(Catch)
-catch_discover_tests(tests)
+option(BUILD_TESTING "Enable test discovery" ON)
+if(BUILD_TESTING)
+  list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)
+  include(CTest)
+  include(Catch)
+  catch_discover_tests(tests)
+endif()

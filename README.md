@@ -1,5 +1,7 @@
 # cpp-llamalib
 
+[![CI](https://github.com/yhirose/cpp-llamalib/actions/workflows/ci.yml/badge.svg)](https://github.com/yhirose/cpp-llamalib/actions/workflows/ci.yml)
+
 A C++17 single-file header-only wrapper for [llama.cpp](https://github.com/ggml-org/llama.cpp).<br>
 Just include **cpp-llamalib.h** to call llama.cpp with a simple, high-level API.
 

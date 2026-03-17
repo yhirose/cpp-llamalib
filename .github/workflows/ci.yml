@@ -51,7 +51,7 @@ jobs:
           key: deps-${{ matrix.os }}-${{ hashFiles('CMakeLists.txt') }}
 
       - name: Configure
-        run: cmake -B build -DMODEL_PATH=dummy
+        run: cmake -B build -DMODEL_PATH=dummy -DBUILD_TESTING=OFF
 
       - name: Build
         run: cmake --build build --config Release -j4
