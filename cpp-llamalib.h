@@ -127,9 +127,20 @@ private:
     auto vocab = llama_model_get_vocab(model_.get());
 
     std::vector<llama_token> tokens(prompt.size() + 16);
-    auto n = llama_tokenize(vocab, prompt.c_str(), prompt.size(),
+    auto tokenize = [&] {
+      return llama_tokenize(vocab, prompt.c_str(), prompt.size(),
                             tokens.data(), tokens.size(), true, true);
-    tokens.resize(n);
+    };
+    auto n = tokenize();
+    if (n < 0) {
+      // Buffer was too small; -n is the required size
+      tokens.resize(static_cast<size_t>(-n));
+      n = tokenize();
+      if (n < 0) {
+        throw std::runtime_error("Failed to tokenize prompt");
+      }
+    }
+    tokens.resize(static_cast<size_t>(n));
 
     llama_kv_self_clear(slot.ctx.get());
     llama_decode(slot.ctx.get(),

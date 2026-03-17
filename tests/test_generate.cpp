@@ -92,6 +92,23 @@ TEST_CASE("generate produces output", "[generate]") {
   }
 }
 
+TEST_CASE("long prompt tokenization", "[generate]") {
+  llamalib::Params params;
+  params.n_ctx = 2048;
+  params.max_tokens = 8;
+  llamalib::LLM llm(model_path, params);
+
+  // Emoji sequences: each emoji is 4 bytes in UTF-8 but may tokenize
+  // into multiple byte-level tokens, potentially exceeding the
+  // prompt.size() + 16 buffer if not handled properly.
+  std::string long_prompt;
+  for (int i = 0; i < 300; i++) {
+    long_prompt += "\xF0\x9F\x98\x80";  // U+1F600 grinning face
+  }
+
+  REQUIRE_NOTHROW(llm.generate(long_prompt));
+}
+
 TEST_CASE("multiple LLM instances coexist", "[llm]") {
   llamalib::Params params;
   params.n_ctx = 512;
