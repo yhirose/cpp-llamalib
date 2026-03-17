@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache model
+        uses: actions/cache@v4
+        with:
+          path: build/models
+          key: model-gemma-3-1b-it-Q4_K_M
+
+      - name: Configure
+        run: cmake -B build
+
+      - name: Build
+        run: cmake --build build -j$(nproc 2>/dev/null || sysctl -n hw.ncpu)
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure

@@ -1,0 +1,80 @@
+name: Update llama.cpp
+
+on:
+  schedule:
+    - cron: "0 9 * * 1"  # Every Monday at 9:00 UTC
+  workflow_dispatch:        # Manual trigger
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for new release
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          latest=$(gh api repos/ggml-org/llama.cpp/releases/latest --jq '.tag_name')
+          latest_date=$(gh api repos/ggml-org/llama.cpp/releases/latest --jq '.published_at[:10]')
+          current=$(grep -oP 'GIT_TAG\s+\K\S+' CMakeLists.txt)
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          echo "latest_date=$latest_date" >> "$GITHUB_OUTPUT"
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          if [ "$latest" != "$current" ]; then
+            echo "needs_update=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Update version references
+        if: steps.check.outputs.needs_update == 'true'
+        run: |
+          sed -i "s/GIT_TAG\s\+\S\+/GIT_TAG        ${{ steps.check.outputs.latest }}/" CMakeLists.txt
+          sed -i "s|llama.cpp \[.*\](https://github.com/ggml-org/llama.cpp/releases/tag/[^)]*), [0-9-]*\.|llama.cpp [${{ steps.check.outputs.latest }}](https://github.com/ggml-org/llama.cpp/releases/tag/${{ steps.check.outputs.latest }}), ${{ steps.check.outputs.latest_date }}.|" README.md
+
+      - name: Cache model
+        if: steps.check.outputs.needs_update == 'true'
+        uses: actions/cache@v4
+        with:
+          path: build/models
+          key: model-gemma-3-1b-it-Q4_K_M
+
+      - name: Build and test
+        if: steps.check.outputs.needs_update == 'true'
+        id: build
+        run: |
+          cmake -B build
+          cmake --build build -j$(nproc)
+          if ctest --test-dir build --output-on-failure; then
+            echo "result=pass" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=fail" >> "$GITHUB_OUTPUT"
+          fi
+        timeout-minutes: 30
+
+      - name: Create Pull Request
+        if: steps.check.outputs.needs_update == 'true'
+        id: pr
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: update-llama-cpp-${{ steps.check.outputs.latest }}
+          commit-message: "Update llama.cpp to ${{ steps.check.outputs.latest }}"
+          title: "Update llama.cpp to ${{ steps.check.outputs.latest }}"
+          body: |
+            Updates llama.cpp from `${{ steps.check.outputs.current }}` to `${{ steps.check.outputs.latest }}`.
+
+            Release: https://github.com/ggml-org/llama.cpp/releases/tag/${{ steps.check.outputs.latest }}
+
+            Build: **${{ steps.build.outputs.result == 'pass' && 'PASS ✅' || 'FAIL ❌' }}**
+
+      - name: Auto-merge if tests passed
+        if: steps.check.outputs.needs_update == 'true' && steps.build.outputs.result == 'pass' && steps.pr.outputs.pull-request-number
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr merge ${{ steps.pr.outputs.pull-request-number }} --squash --auto

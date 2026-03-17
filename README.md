@@ -12,9 +12,9 @@ Just include **cpp-llamalib.h** to call llama.cpp with a simple, high-level API.
 
 ## Integration
 
-cpp-llamalib is a header-only library.
-Copy `cpp-llamalib.h` into your project and `#include` it.
-Your project must link against llama.cpp (`llama` and `ggml` libraries).
+Please copy `cpp-llamalib.h` into your project and `#include` it.
+
+Your project must link against llama.cpp (`llama` and `ggml` libraries). (Tested against llama.cpp [b8389](https://github.com/ggml-org/llama.cpp/releases/tag/b8389), 2026-03-17.)
 
 ## Examples
 

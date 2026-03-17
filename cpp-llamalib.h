@@ -93,9 +93,8 @@ public:
   Llama &operator=(Llama &&other) noexcept {
     if (this != &other) {
       // Destroy slots before model (contexts reference the model).
-      // No backend_free needed: this is ownership transfer, not destruction.
-      // other's destructor will skip backend_free since other.model_ is null.
       slots_ = {};
+      if (model_) { detail::backend_free(); }
       model_.reset();
       params_ = other.params_;
       model_ = std::move(other.model_);
@@ -179,7 +178,7 @@ private:
           " max_tokens exceeds context size " + std::to_string(n_ctx));
     }
 
-    llama_kv_self_clear(slot.ctx.get());
+    llama_memory_clear(llama_get_memory(slot.ctx.get()), true);
     if (llama_decode(slot.ctx.get(),
                      llama_batch_get_one(tokens.data(), tokens.size()))) {
       throw std::runtime_error("llama_decode failed on prompt");
@@ -194,11 +193,19 @@ private:
       char buf[256];
       auto len =
           llama_token_to_piece(vocab, new_token, buf, sizeof(buf), 0, true);
-      if (len > 0) {
-        result.append(buf, len);
-        if (callback) {
-          if (!callback(std::string(buf, len))) break;
+      if (len < 0) {
+        // Buffer too small; resize and retry
+        std::string piece(static_cast<size_t>(-len), '\0');
+        len = llama_token_to_piece(vocab, new_token, piece.data(),
+                                   piece.size(), 0, true);
+        if (len > 0) {
+          piece.resize(len);
+          result += piece;
+          if (callback && !callback(piece)) break;
         }
+      } else if (len > 0) {
+        result.append(buf, len);
+        if (callback && !callback(std::string(buf, len))) break;
       }
 
       if (llama_decode(slot.ctx.get(), llama_batch_get_one(&new_token, 1))) {
