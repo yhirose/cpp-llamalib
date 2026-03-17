@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <functional>
 #include <mutex>
 #include <queue>
 #include <stdexcept>
@@ -27,12 +28,20 @@ inline void backend_free() {
 }
 } // namespace detail
 
+// Callback to stream tokens during generation. Return false to stop early.
+using StreamCallback = std::function<bool(const std::string &token)>;
+
+// Callback to configure the sampler chain. Receives an empty chain;
+// add samplers (e.g. temp, dist, penalties) as needed.
+using SamplerSetup = std::function<void(llama_sampler *chain)>;
+
 struct Params {
   int n_gpu_layers = 99;
   int n_ctx = 2048;
   float temperature = 0.3f;
   int max_tokens = 512;
   int n_slots = 1;
+  SamplerSetup sampler_setup = nullptr;
 };
 
 class LLM {
@@ -56,10 +65,14 @@ public:
 
       auto smpl = llama_sampler_ptr{
           llama_sampler_chain_init(llama_sampler_chain_default_params())};
-      llama_sampler_chain_add(smpl.get(),
-                              llama_sampler_init_temp(params.temperature));
-      llama_sampler_chain_add(smpl.get(),
-                              llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
+      if (params.sampler_setup) {
+        params.sampler_setup(smpl.get());
+      } else {
+        llama_sampler_chain_add(smpl.get(),
+                                llama_sampler_init_temp(params.temperature));
+        llama_sampler_chain_add(smpl.get(),
+                                llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
+      }
 
       slots_.push({std::move(ctx), std::move(smpl)});
     }
@@ -92,14 +105,29 @@ public:
   }
 
   std::string generate(const std::string &prompt) {
-    return generate(prompt, params_.max_tokens);
+    return generate(prompt, params_.max_tokens, nullptr);
   }
 
   std::string generate(const std::string &prompt, int max_tokens) {
+    return generate(prompt, max_tokens, nullptr);
+  }
+
+  std::string generate(const std::string &prompt,
+                       const StreamCallback &callback) {
+    return generate(prompt, params_.max_tokens, callback);
+  }
+
+  std::string generate(const std::string &prompt, int max_tokens,
+                       const StreamCallback &callback) {
     auto slot = acquire_slot();
-    auto result = run_inference(slot, prompt, max_tokens);
-    release_slot(std::move(slot));
-    return result;
+    try {
+      auto result = run_inference(slot, prompt, max_tokens, callback);
+      release_slot(std::move(slot));
+      return result;
+    } catch (...) {
+      release_slot(std::move(slot));
+      throw;
+    }
   }
 
 private:
@@ -123,7 +151,7 @@ private:
   }
 
   std::string run_inference(Slot &slot, const std::string &prompt,
-                            int max_tokens) {
+                            int max_tokens, const StreamCallback &callback) {
     llama_sampler_reset(slot.smpl.get());
     auto vocab = llama_model_get_vocab(model_.get());
 
@@ -166,7 +194,12 @@ private:
       char buf[256];
       auto len =
           llama_token_to_piece(vocab, new_token, buf, sizeof(buf), 0, true);
-      if (len > 0) result.append(buf, len);
+      if (len > 0) {
+        result.append(buf, len);
+        if (callback) {
+          if (!callback(std::string(buf, len))) break;
+        }
+      }
 
       if (llama_decode(slot.ctx.get(), llama_batch_get_one(&new_token, 1))) {
         throw std::runtime_error("llama_decode failed during generation");

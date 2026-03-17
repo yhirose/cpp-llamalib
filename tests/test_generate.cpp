@@ -139,6 +139,51 @@ TEST_CASE("decode failure throws on context overflow", "[generate]") {
   REQUIRE_THROWS_AS(llm.generate(long_prompt), std::runtime_error);
 }
 
+TEST_CASE("streaming generate", "[generate][streaming]") {
+  llamalib::Params params;
+  params.n_ctx = 512;
+  params.max_tokens = 32;
+  llamalib::LLM llm(model_path, params);
+
+  SECTION("callback receives tokens and concatenation matches result") {
+    std::string streamed;
+    auto result = llm.generate("Hello", params.max_tokens,
+                               [&](const std::string &token) {
+                                 streamed += token;
+                                 return true;
+                               });
+    REQUIRE(result == streamed);
+    REQUIRE_FALSE(result.empty());
+  }
+
+  SECTION("returning false from callback stops generation early") {
+    int count = 0;
+    auto result = llm.generate("Tell me a long story", params.max_tokens,
+                               [&](const std::string &) {
+                                 return ++count < 3;
+                               });
+    REQUIRE(count == 3);
+  }
+}
+
+TEST_CASE("custom sampler configuration", "[generate][sampler]") {
+  llamalib::Params params;
+  params.n_ctx = 512;
+  params.max_tokens = 16;
+  // Custom sampler: greedy (temp=0, no dist)
+  params.sampler_setup = [](llama_sampler *chain) {
+    llama_sampler_chain_add(chain, llama_sampler_init_temp(0.0f));
+    llama_sampler_chain_add(chain, llama_sampler_init_dist(42));
+  };
+  llamalib::LLM llm(model_path, params);
+
+  auto r1 = llm.generate("What is 2+2?");
+  auto r2 = llm.generate("What is 2+2?");
+  REQUIRE_FALSE(r1.empty());
+  // With fixed seed, results should be deterministic
+  REQUIRE(r1 == r2);
+}
+
 TEST_CASE("multiple LLM instances coexist", "[llm]") {
   llamalib::Params params;
   params.n_ctx = 512;
