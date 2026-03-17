@@ -142,9 +142,19 @@ private:
     }
     tokens.resize(static_cast<size_t>(n));
 
+    auto n_ctx = llama_n_ctx(slot.ctx.get());
+    if (tokens.size() + max_tokens > n_ctx) {
+      throw std::runtime_error(
+          "Prompt too long: " + std::to_string(tokens.size()) +
+          " prompt tokens + " + std::to_string(max_tokens) +
+          " max_tokens exceeds context size " + std::to_string(n_ctx));
+    }
+
     llama_kv_self_clear(slot.ctx.get());
-    llama_decode(slot.ctx.get(),
-                 llama_batch_get_one(tokens.data(), tokens.size()));
+    if (llama_decode(slot.ctx.get(),
+                     llama_batch_get_one(tokens.data(), tokens.size()))) {
+      throw std::runtime_error("llama_decode failed on prompt");
+    }
 
     std::string result;
     for (auto i = 0; i < max_tokens; i++) {
@@ -157,7 +167,9 @@ private:
           llama_token_to_piece(vocab, new_token, buf, sizeof(buf), 0, true);
       if (len > 0) result.append(buf, len);
 
-      llama_decode(slot.ctx.get(), llama_batch_get_one(&new_token, 1));
+      if (llama_decode(slot.ctx.get(), llama_batch_get_one(&new_token, 1))) {
+        throw std::runtime_error("llama_decode failed during generation");
+      }
     }
     return result;
   }

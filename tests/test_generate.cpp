@@ -109,6 +109,21 @@ TEST_CASE("long prompt tokenization", "[generate]") {
   REQUIRE_NOTHROW(llm.generate(long_prompt));
 }
 
+TEST_CASE("decode failure throws on context overflow", "[generate]") {
+  llamalib::Params params;
+  params.n_ctx = 256;
+  params.max_tokens = 8;
+  llamalib::LLM llm(model_path, params);
+
+  // Build a prompt that exceeds the context window
+  std::string long_prompt;
+  for (int i = 0; i < 200; i++) {
+    long_prompt += "The quick brown fox jumps over the lazy dog. ";
+  }
+
+  REQUIRE_THROWS_AS(llm.generate(long_prompt), std::runtime_error);
+}
+
 TEST_CASE("multiple LLM instances coexist", "[llm]") {
   llamalib::Params params;
   params.n_ctx = 512;
