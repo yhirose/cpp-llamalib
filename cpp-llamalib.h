@@ -33,20 +33,20 @@ using StreamCallback = std::function<bool(const std::string &token)>;
 
 // Callback to configure the sampler chain. Receives an empty chain;
 // add samplers (e.g. temp, dist, penalties) as needed.
-using SamplerSetup = std::function<void(llama_sampler *chain)>;
+using SamplerConfig = std::function<void(llama_sampler *chain)>;
 
-struct Params {
+struct Options {
   int n_gpu_layers = 99;
   int n_ctx = 2048;
   float temperature = 0.3f;
   int max_tokens = 512;
   int n_slots = 1;
-  SamplerSetup sampler_setup = nullptr;
+  SamplerConfig sampler_config = nullptr;
 };
 
-class LLM {
+class Llama {
 public:
-  LLM(const std::string &model_path, const Params &params = {})
+  Llama(const std::string &model_path, const Options &params = {})
       : params_(params) {
     detail::backend_init();
 
@@ -65,8 +65,8 @@ public:
 
       auto smpl = llama_sampler_ptr{
           llama_sampler_chain_init(llama_sampler_chain_default_params())};
-      if (params.sampler_setup) {
-        params.sampler_setup(smpl.get());
+      if (params.sampler_config) {
+        params.sampler_config(smpl.get());
       } else {
         llama_sampler_chain_add(smpl.get(),
                                 llama_sampler_init_temp(params.temperature));
@@ -78,19 +78,19 @@ public:
     }
   }
 
-  ~LLM() {
+  ~Llama() {
     if (model_) { detail::backend_free(); }
   }
 
-  LLM(const LLM &) = delete;
-  LLM &operator=(const LLM &) = delete;
+  Llama(const Llama &) = delete;
+  Llama &operator=(const Llama &) = delete;
 
-  LLM(LLM &&other) noexcept
+  Llama(Llama &&other) noexcept
       : params_(other.params_),
         model_(std::move(other.model_)),
         slots_(std::move(other.slots_)) {}
 
-  LLM &operator=(LLM &&other) noexcept {
+  Llama &operator=(Llama &&other) noexcept {
     if (this != &other) {
       // Destroy slots before model (contexts reference the model).
       // No backend_free needed: this is ownership transfer, not destruction.
@@ -208,7 +208,7 @@ private:
     return result;
   }
 
-  Params params_;
+  Options params_;
   llama_model_ptr model_;
   std::queue<Slot> slots_;
   std::mutex mutex_;

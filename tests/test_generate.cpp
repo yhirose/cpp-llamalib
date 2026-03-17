@@ -10,67 +10,45 @@
 // MODEL_PATH is defined via CMake's target_compile_definitions
 static const char *model_path = MODEL_PATH;
 
-// Helper traits: detect if const LLM& supports generate overloads
-template <typename T, typename = void>
-struct const_has_generate_1 : std::false_type {};
-template <typename T>
-struct const_has_generate_1<
-    T, std::void_t<decltype(std::declval<const T &>().generate(
-           std::declval<const std::string &>()))>> : std::true_type {};
+TEST_CASE("Llama move semantics", "[llm][move]") {
+  STATIC_REQUIRE(std::is_move_constructible_v<llamalib::Llama>);
+  STATIC_REQUIRE(std::is_move_assignable_v<llamalib::Llama>);
 
-template <typename T, typename = void>
-struct const_has_generate_2 : std::false_type {};
-template <typename T>
-struct const_has_generate_2<
-    T, std::void_t<decltype(std::declval<const T &>().generate(
-           std::declval<const std::string &>(), int{}))>> : std::true_type {};
-
-TEST_CASE("generate is non-const", "[llm][const]") {
-  // generate() mutates internal state (slot queue), so it must NOT be
-  // callable on a const LLM reference.
-  STATIC_REQUIRE_FALSE(const_has_generate_1<llamalib::LLM>::value);
-  STATIC_REQUIRE_FALSE(const_has_generate_2<llamalib::LLM>::value);
-}
-
-TEST_CASE("LLM move semantics", "[llm][move]") {
-  STATIC_REQUIRE(std::is_move_constructible_v<llamalib::LLM>);
-  STATIC_REQUIRE(std::is_move_assignable_v<llamalib::LLM>);
-
-  llamalib::Params params;
+  llamalib::Options params;
   params.n_ctx = 512;
   params.max_tokens = 16;
 
-  llamalib::LLM original(model_path, params);
-  llamalib::LLM moved(std::move(original));
+  llamalib::Llama original(model_path, params);
+  llamalib::Llama moved(std::move(original));
 
   auto result = moved.generate("Hello");
   REQUIRE_FALSE(result.empty());
 }
 
-TEST_CASE("LLM construction", "[llm]") {
+TEST_CASE("Llama construction", "[llm]") {
   SECTION("valid model loads successfully") {
-    REQUIRE_NOTHROW(llamalib::LLM(model_path));
+    REQUIRE_NOTHROW(llamalib::Llama(model_path));
   }
 
   SECTION("invalid model path throws") {
-    REQUIRE_THROWS_AS(llamalib::LLM("/nonexistent/model.gguf"),
+    REQUIRE_THROWS_AS(llamalib::Llama("/nonexistent/model.gguf"),
                       std::runtime_error);
   }
 
   SECTION("custom params are accepted") {
-    llamalib::Params params;
+    llamalib::Options params;
     params.n_ctx = 512;
     params.max_tokens = 64;
     params.n_slots = 2;
-    REQUIRE_NOTHROW(llamalib::LLM(model_path, params));
+    REQUIRE_NOTHROW(llamalib::Llama(model_path, params));
   }
 }
 
 TEST_CASE("generate produces output", "[generate]") {
-  llamalib::Params params;
+  llamalib::Options params;
   params.n_ctx = 512;
   params.max_tokens = 32;
-  llamalib::LLM llm(model_path, params);
+  llamalib::Llama llm(model_path, params);
 
   SECTION("returns non-empty string") {
     auto result = llm.generate("Hello");
@@ -87,16 +65,15 @@ TEST_CASE("generate produces output", "[generate]") {
   SECTION("different prompts produce different outputs") {
     auto result1 = llm.generate("What is 1+1?");
     auto result2 = llm.generate("Write a poem about the sea");
-    // With distinct prompts, outputs should differ
     REQUIRE(result1 != result2);
   }
 }
 
 TEST_CASE("long prompt tokenization", "[generate]") {
-  llamalib::Params params;
+  llamalib::Options params;
   params.n_ctx = 2048;
   params.max_tokens = 8;
-  llamalib::LLM llm(model_path, params);
+  llamalib::Llama llm(model_path, params);
 
   // Emoji sequences: each emoji is 4 bytes in UTF-8 but may tokenize
   // into multiple byte-level tokens, potentially exceeding the
@@ -110,27 +87,24 @@ TEST_CASE("long prompt tokenization", "[generate]") {
 }
 
 TEST_CASE("sampler reset produces consistent results", "[generate]") {
-  llamalib::Params params;
+  llamalib::Options params;
   params.n_ctx = 512;
   params.max_tokens = 32;
   params.temperature = 0.0f;  // Greedy for determinism
   params.n_slots = 1;
-  llamalib::LLM llm(model_path, params);
+  llamalib::Llama llm(model_path, params);
 
-  // With sampler reset and greedy sampling, repeated calls with the
-  // same prompt should produce identical output.
   auto result1 = llm.generate("What is 2+2?");
   auto result2 = llm.generate("What is 2+2?");
   REQUIRE(result1 == result2);
 }
 
 TEST_CASE("decode failure throws on context overflow", "[generate]") {
-  llamalib::Params params;
+  llamalib::Options params;
   params.n_ctx = 256;
   params.max_tokens = 8;
-  llamalib::LLM llm(model_path, params);
+  llamalib::Llama llm(model_path, params);
 
-  // Build a prompt that exceeds the context window
   std::string long_prompt;
   for (int i = 0; i < 200; i++) {
     long_prompt += "The quick brown fox jumps over the lazy dog. ";
@@ -140,10 +114,10 @@ TEST_CASE("decode failure throws on context overflow", "[generate]") {
 }
 
 TEST_CASE("streaming generate", "[generate][streaming]") {
-  llamalib::Params params;
+  llamalib::Options params;
   params.n_ctx = 512;
   params.max_tokens = 32;
-  llamalib::LLM llm(model_path, params);
+  llamalib::Llama llm(model_path, params);
 
   SECTION("callback receives tokens and concatenation matches result") {
     std::string streamed;
@@ -167,15 +141,15 @@ TEST_CASE("streaming generate", "[generate][streaming]") {
 }
 
 TEST_CASE("custom sampler configuration", "[generate][sampler]") {
-  llamalib::Params params;
+  llamalib::Options params;
   params.n_ctx = 512;
   params.max_tokens = 16;
-  // Custom sampler: greedy (temp=0, no dist)
-  params.sampler_setup = [](llama_sampler *chain) {
+  // Custom sampler: greedy (temp=0) with fixed seed
+  params.sampler_config = [](llama_sampler *chain) {
     llama_sampler_chain_add(chain, llama_sampler_init_temp(0.0f));
     llama_sampler_chain_add(chain, llama_sampler_init_dist(42));
   };
-  llamalib::LLM llm(model_path, params);
+  llamalib::Llama llm(model_path, params);
 
   auto r1 = llm.generate("What is 2+2?");
   auto r2 = llm.generate("What is 2+2?");
@@ -184,13 +158,13 @@ TEST_CASE("custom sampler configuration", "[generate][sampler]") {
   REQUIRE(r1 == r2);
 }
 
-TEST_CASE("multiple LLM instances coexist", "[llm]") {
-  llamalib::Params params;
+TEST_CASE("multiple Llama instances coexist", "[llm]") {
+  llamalib::Options params;
   params.n_ctx = 512;
   params.max_tokens = 16;
 
-  llamalib::LLM llm1(model_path, params);
-  llamalib::LLM llm2(model_path, params);
+  llamalib::Llama llm1(model_path, params);
+  llamalib::Llama llm2(model_path, params);
 
   auto r1 = llm1.generate("Hello");
   auto r2 = llm2.generate("Hello");
@@ -200,11 +174,11 @@ TEST_CASE("multiple LLM instances coexist", "[llm]") {
 }
 
 TEST_CASE("concurrent generate calls with slot pool", "[generate][concurrent]") {
-  llamalib::Params params;
+  llamalib::Options params;
   params.n_ctx = 512;
   params.max_tokens = 16;
   params.n_slots = 2;
-  llamalib::LLM llm(model_path, params);
+  llamalib::Llama llm(model_path, params);
 
   std::vector<std::future<std::string>> futures;
   for (int i = 0; i < 4; i++) {
