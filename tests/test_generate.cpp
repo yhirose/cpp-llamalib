@@ -4,10 +4,33 @@
 
 #include <future>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 // MODEL_PATH is defined via CMake's target_compile_definitions
 static const char *model_path = MODEL_PATH;
+
+// Helper traits: detect if const LLM& supports generate overloads
+template <typename T, typename = void>
+struct const_has_generate_1 : std::false_type {};
+template <typename T>
+struct const_has_generate_1<
+    T, std::void_t<decltype(std::declval<const T &>().generate(
+           std::declval<const std::string &>()))>> : std::true_type {};
+
+template <typename T, typename = void>
+struct const_has_generate_2 : std::false_type {};
+template <typename T>
+struct const_has_generate_2<
+    T, std::void_t<decltype(std::declval<const T &>().generate(
+           std::declval<const std::string &>(), int{}))>> : std::true_type {};
+
+TEST_CASE("generate is non-const", "[llm][const]") {
+  // generate() mutates internal state (slot queue), so it must NOT be
+  // callable on a const LLM reference.
+  STATIC_REQUIRE_FALSE(const_has_generate_1<llamalib::LLM>::value);
+  STATIC_REQUIRE_FALSE(const_has_generate_2<llamalib::LLM>::value);
+}
 
 TEST_CASE("LLM construction", "[llm]") {
   SECTION("valid model loads successfully") {

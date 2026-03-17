@@ -70,11 +70,11 @@ public:
   LLM(const LLM &) = delete;
   LLM &operator=(const LLM &) = delete;
 
-  std::string generate(const std::string &prompt) const {
+  std::string generate(const std::string &prompt) {
     return generate(prompt, params_.max_tokens);
   }
 
-  std::string generate(const std::string &prompt, int max_tokens) const {
+  std::string generate(const std::string &prompt, int max_tokens) {
     auto slot = acquire_slot();
     auto result = run_inference(slot, prompt, max_tokens);
     release_slot(std::move(slot));
@@ -87,7 +87,7 @@ private:
     llama_sampler_ptr smpl;
   };
 
-  Slot acquire_slot() const {
+  Slot acquire_slot() {
     std::unique_lock lock(mutex_);
     cv_.wait(lock, [&] { return !slots_.empty(); });
     auto slot = std::move(slots_.front());
@@ -95,14 +95,14 @@ private:
     return slot;
   }
 
-  void release_slot(Slot slot) const {
+  void release_slot(Slot slot) {
     std::lock_guard lock(mutex_);
     slots_.push(std::move(slot));
     cv_.notify_one();
   }
 
-  std::string run_inference(const Slot &slot, const std::string &prompt,
-                            int max_tokens) const {
+  std::string run_inference(Slot &slot, const std::string &prompt,
+                            int max_tokens) {
     auto vocab = llama_model_get_vocab(model_.get());
 
     std::vector<llama_token> tokens(prompt.size() + 16);
@@ -132,9 +132,9 @@ private:
 
   Params params_;
   llama_model_ptr model_;
-  mutable std::queue<Slot> slots_;
-  mutable std::mutex mutex_;
-  mutable std::condition_variable cv_;
+  std::queue<Slot> slots_;
+  std::mutex mutex_;
+  std::condition_variable cv_;
 };
 
 } // namespace llamalib
