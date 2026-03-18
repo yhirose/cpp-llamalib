@@ -8,7 +8,8 @@ Just include **cpp-llamalib.h** to call llama.cpp with a simple, high-level API.
 ## Features
 
 - Header-only — single file, no build step for the wrapper itself
-- Simple `generate()` API with streaming support
+- Two-tier API: raw `generate()` and template-aware `chat()`
+- `ChatSession` wrapper for multi-turn conversations
 - Thread-safe concurrent generation via slot pool
 - Custom sampler configuration
 
@@ -21,23 +22,55 @@ Tested against llama.cpp [b8389](https://github.com/ggml-org/llama.cpp/releases/
 
 ## Examples
 
-### Text generation
+### Raw text generation
 
-Load a GGUF model and generate text from a prompt. The result is returned as a `std::string`.
+`generate()` sends the prompt directly to the model without any chat template formatting.
 
 ```cpp
 #include "cpp-llamalib.h"
 
 llamalib::Llama llm("model.gguf");
-auto result = llm.generate("Explain C++ RAII in one sentence.");
+auto result = llm.generate("Once upon a time");
+```
+
+### Chat
+
+`chat()` applies the model's embedded chat template before generation.
+
+```cpp
+// Single message (auto-wrapped as "user" role)
+auto result = llm.chat("Explain C++ RAII in one sentence.");
+
+// Multi-turn with explicit history management
+std::vector<llamalib::Message> messages = {
+    {"system", "You are a helpful assistant."},
+    {"user", "What is RAII?"},
+};
+auto r1 = llm.chat(messages);
+
+messages.push_back({"assistant", r1});
+messages.push_back({"user", "Give me an example."});
+auto r2 = llm.chat(messages);
+```
+
+### ChatSession
+
+`ChatSession` manages conversation history automatically.
+
+```cpp
+llamalib::ChatSession session(llm, "You are a C++ expert.");
+auto r1 = session.say("What is a smart pointer?");
+auto r2 = session.say("How does unique_ptr differ from shared_ptr?");
+
+session.clear();  // Reset history (system prompt is preserved)
 ```
 
 ### Streaming
 
-Pass a callback to receive tokens as they are generated. Return `false` from the callback to stop early.
+Pass a callback to receive tokens as they are generated. Return `false` from the callback to stop early. Works with both `generate()` and `chat()`.
 
 ```cpp
-llm.generate("Write a haiku about the sea.", [](const std::string &token) {
+llm.chat("Write a haiku about the sea.", [](std::string_view token) {
     std::cout << token << std::flush;
     return true;  // return false to stop early
 });
@@ -45,12 +78,11 @@ llm.generate("Write a haiku about the sea.", [](const std::string &token) {
 
 ### Custom parameters
 
-Configure context size, token limits, temperature, and concurrency via `Options`.
+Configure context size, temperature, and concurrency via `Options`.
 
 ```cpp
 llamalib::Options opts;
 opts.n_ctx = 4096;
-opts.max_tokens = 256;
 opts.temperature = 0.7f;
 opts.n_slots = 4;  // concurrent generation slots
 
@@ -117,7 +149,6 @@ llamalib::Llama llm("model.gguf", opts);
 | `n_gpu_layers` | `int` | `99` | Number of layers to offload to GPU |
 | `n_ctx` | `int` | `2048` | Context window size |
 | `temperature` | `float` | `0.3f` | Sampling temperature |
-| `max_tokens` | `int` | `512` | Default max tokens to generate |
 | `n_slots` | `int` | `1` | Number of concurrent generation slots |
 | `sampler_config` | `SamplerConfig` | `nullptr` | Custom sampler chain configuration callback |
 
@@ -136,21 +167,67 @@ Loads the model and creates context/sampler slots. Throws `std::runtime_error` o
 ```cpp
 std::string generate(const std::string &prompt)
 std::string generate(const std::string &prompt, int max_tokens)
-std::string generate(const std::string &prompt, const StreamCallback &callback)
-std::string generate(const std::string &prompt, int max_tokens, const StreamCallback &callback)
+void generate(const std::string &prompt, const StreamCallback &callback)
+void generate(const std::string &prompt, int max_tokens, const StreamCallback &callback)
 ```
 
-Generates text from a prompt. Thread-safe — concurrent calls queue for available slots.
+Raw text completion — sends the prompt directly without chat template formatting. Thread-safe.
 
-- `max_tokens` — overrides `Options::max_tokens` for this call
+#### `chat`
+
+```cpp
+// Single message (auto-wrapped as "user" role)
+std::string chat(const std::string &message)
+std::string chat(const std::string &message, int max_tokens)
+void chat(const std::string &message, const StreamCallback &callback)
+void chat(const std::string &message, int max_tokens, const StreamCallback &callback)
+
+// Multi-turn
+std::string chat(const std::vector<Message> &messages)
+std::string chat(const std::vector<Message> &messages, int max_tokens)
+void chat(const std::vector<Message> &messages, const StreamCallback &callback)
+void chat(const std::vector<Message> &messages, int max_tokens, const StreamCallback &callback)
+```
+
+Applies the model's embedded chat template, then generates. Falls back to raw concatenation if the model has no template.
+
+#### Common parameters
+
+- `max_tokens` — maximum tokens to generate; defaults to `-1` (generate until EOS or context limit)
 - `callback` — called with each token as it is generated; return `false` to stop early
 
 Throws `std::runtime_error` if the prompt is too long for the context window or if decoding fails.
 
+### `llamalib::Message`
+
+```cpp
+struct Message {
+    std::string role;     // "system", "user", or "assistant"
+    std::string content;
+};
+```
+
+### `llamalib::ChatSession`
+
+```cpp
+ChatSession(Llama &llm, const std::string &system_prompt = "")
+```
+
+Wraps `Llama::chat()` with automatic conversation history management.
+
+| Method | Description |
+| ------ | ----------- |
+| `say(message)` | Appends user message, calls `chat()`, appends assistant reply, returns reply |
+| `say(message, max_tokens)` | Same with max_tokens override |
+| `say(message, callback)` | Streaming version (void); history is still updated internally |
+| `say(message, max_tokens, callback)` | Same with max_tokens override |
+| `history()` | Returns `const std::vector<Message>&` of the conversation |
+| `clear()` | Clears history (preserves system prompt if set) |
+
 ### Type aliases
 
 ```cpp
-using StreamCallback = std::function<bool(const std::string &token)>;
+using StreamCallback = std::function<bool(std::string_view token)>;
 using SamplerConfig = std::function<void(llama_sampler *chain)>;
 ```
 
