@@ -18,7 +18,7 @@ Just include **cpp-llamalib.h** to call llama.cpp with a simple, high-level API.
 Please copy `cpp-llamalib.h` into your project and `#include` it.
 
 Your project must link against llama.cpp (`llama` and `ggml` libraries).<br>
-Tested against llama.cpp [b8389](https://github.com/ggml-org/llama.cpp/releases/tag/b8389), 2026-03-17.
+Tested against llama.cpp [b8400](https://github.com/ggml-org/llama.cpp/releases/tag/b8400), 2026-03-17.
 
 ## Examples
 
