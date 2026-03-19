@@ -45,6 +45,7 @@ struct GenerateOptions {
   int max_tokens = -1;
   std::string grammar;       // GBNF grammar string (empty = no constraint)
   std::string grammar_root;  // Root rule name (default "root")
+  std::vector<std::string> stop;  // Stop sequences (generation stops when any appears)
 };
 
 struct Options {
@@ -132,6 +133,15 @@ public:
     run_inference(guard.slot, prompt, opts, callback);
   }
 
+  std::vector<llama_token> tokenize(const std::string &text) const {
+    auto vocab = llama_model_get_vocab(model_.get());
+    return tokenize_text(vocab, text);
+  }
+
+  size_t token_count(const std::string &text) const {
+    return tokenize(text).size();
+  }
+
   inline ChatSession session(const std::string &system_prompt = "");
 
   void clear_cache() {
@@ -209,6 +219,23 @@ private:
     cv_.notify_one();
   }
 
+  static std::vector<llama_token> tokenize_text(const llama_vocab *vocab,
+                                                  const std::string &text) {
+    std::vector<llama_token> tokens(text.size() + 16);
+    auto n = llama_tokenize(vocab, text.c_str(), text.size(), tokens.data(),
+                            tokens.size(), true, true);
+    if (n < 0) {
+      tokens.resize(static_cast<size_t>(-n));
+      n = llama_tokenize(vocab, text.c_str(), text.size(), tokens.data(),
+                          tokens.size(), true, true);
+      if (n < 0) {
+        throw std::runtime_error("Failed to tokenize text");
+      }
+    }
+    tokens.resize(static_cast<size_t>(n));
+    return tokens;
+  }
+
   static std::string concat_contents(const std::vector<Message> &messages) {
     size_t total = 0;
     for (const auto &m : messages) { total += m.content.size(); }
@@ -248,21 +275,7 @@ private:
     llama_sampler_reset(slot.smpl.get());
     auto vocab = llama_model_get_vocab(model_.get());
 
-    std::vector<llama_token> tokens(prompt.size() + 16);
-    auto tokenize = [&] {
-      return llama_tokenize(vocab, prompt.c_str(), prompt.size(), tokens.data(),
-                            tokens.size(), true, true);
-    };
-    auto n = tokenize();
-    if (n < 0) {
-      // Buffer was too small; -n is the required size
-      tokens.resize(static_cast<size_t>(-n));
-      n = tokenize();
-      if (n < 0) {
-        throw std::runtime_error("Failed to tokenize prompt");
-      }
-    }
-    tokens.resize(static_cast<size_t>(n));
+    auto tokens = tokenize_text(vocab, prompt);
 
     auto n_ctx = llama_n_ctx(slot.ctx.get());
     auto max_tokens = opts.max_tokens;
@@ -344,7 +357,15 @@ private:
       }
     } grammar_guard{slot.smpl.get(), has_grammar};
 
+    // Compute the max length among stop sequences for buffer management
+    size_t max_stop_len = 0;
+    for (const auto &s : opts.stop) {
+      if (s.size() > max_stop_len) max_stop_len = s.size();
+    }
+    bool has_stop = max_stop_len > 0;
+
     std::string result;
+    std::string pending;  // Buffer for partial stop-sequence matching
     std::string piece;
     for (auto i = 0; i < max_tokens; i++) {
       auto new_token =
@@ -364,14 +385,59 @@ private:
       std::string_view sv = (len <= static_cast<int>(sizeof(buf)))
                                  ? std::string_view(buf, static_cast<size_t>(len))
                                  : std::string_view(piece.data(), static_cast<size_t>(len));
-      if (callback) {
-        if (!callback(sv)) break;
+
+      if (has_stop) {
+        pending.append(sv);
+
+        // Check for complete stop sequence match
+        bool found_stop = false;
+        for (const auto &s : opts.stop) {
+          if (s.empty()) continue;
+          auto pos = pending.find(s);
+          if (pos != std::string::npos) {
+            // Emit text before the stop sequence
+            auto emit = std::string_view(pending.data(), pos);
+            if (callback) {
+              if (!emit.empty()) callback(emit);
+            } else {
+              result.append(emit);
+            }
+            found_stop = true;
+            break;
+          }
+        }
+        if (found_stop) { pending.clear(); break; }
+
+        // Flush confirmed-safe bytes that can't be part of a stop sequence
+        if (pending.size() > max_stop_len) {
+          auto safe = pending.size() - max_stop_len;
+          auto emit = std::string_view(pending.data(), safe);
+          if (callback) {
+            if (!callback(emit)) break;
+          } else {
+            result.append(emit);
+          }
+          pending.erase(0, safe);
+        }
       } else {
-        result.append(sv);
+        if (callback) {
+          if (!callback(sv)) break;
+        } else {
+          result.append(sv);
+        }
       }
 
       if (llama_decode(slot.ctx.get(), llama_batch_get_one(&new_token, 1))) {
         throw std::runtime_error("llama_decode failed during generation");
+      }
+    }
+
+    // Flush remaining pending buffer (no stop sequence matched)
+    if (!pending.empty()) {
+      if (callback) {
+        callback(pending);
+      } else {
+        result.append(pending);
       }
     }
 

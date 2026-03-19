@@ -11,6 +11,8 @@ Just include **cpp-llamalib.h** to call llama.cpp with a simple, high-level API.
 - Two-tier API: raw `generate()` and template-aware `chat()`
 - `ChatSession` wrapper for multi-turn conversations
 - KV cache reuse — shared prompt prefixes are not re-processed
+- Stop sequences — halt generation when a specified string appears
+- Tokenize API — count tokens before generation to check context limits
 - Structured output via GBNF grammar constraints
 - Thread-safe concurrent generation via slot pool
 - Custom sampler configuration
@@ -89,6 +91,33 @@ opts.grammar = R"(root ::= "yes" | "no")";
 
 auto answer = llm.chat("Is the sky blue?", opts);
 // answer is guaranteed to be "yes" or "no"
+```
+
+### Stop sequences
+
+Use `GenerateOptions::stop` to halt generation when any of the specified strings appears. The stop sequence itself is excluded from the output. Works with `generate()`, `chat()`, and streaming.
+
+```cpp
+llamalib::GenerateOptions opts;
+opts.max_tokens = 128;
+opts.stop = {"\n", "。"};
+
+auto result = llm.chat("List one item:", opts);
+// Generation stops at the first newline or period
+```
+
+### Tokenize
+
+Use `tokenize()` or `token_count()` to inspect token counts before generation — useful for checking context limits.
+
+```cpp
+auto tokens = llm.tokenize("Hello, world!");  // std::vector<llama_token>
+auto count = llm.token_count("Hello, world!"); // count == tokens.size()
+
+// Check context limits before generating
+if (llm.token_count(prompt) > 1800) {
+    // Truncate or split the prompt
+}
 ```
 
 ### KV cache reuse
@@ -185,6 +214,7 @@ llamalib::Llama llm("model.gguf", opts);
 | `max_tokens` | `int` | `-1` | Maximum tokens to generate (-1 = until EOS or context limit) |
 | `grammar` | `std::string` | `""` | GBNF grammar string (empty = no constraint) |
 | `grammar_root` | `std::string` | `""` | Root rule name (defaults to `"root"`) |
+| `stop` | `std::vector<std::string>` | `{}` | Stop sequences (generation stops when any appears; empty strings are ignored) |
 
 ### `llamalib::Llama`
 
@@ -204,7 +234,7 @@ void generate(const std::string &prompt, const StreamCallback &callback)
 void generate(const std::string &prompt, const GenerateOptions &opts, const StreamCallback &callback)
 ```
 
-Raw text completion — sends the prompt directly without chat template formatting. Thread-safe.
+Raw text completion — sends the prompt directly without chat template formatting. Thread-safe. Throws `std::runtime_error` if the prompt is too long for the context window or if decoding fails.
 
 #### `chat`
 
@@ -220,7 +250,23 @@ void chat(const std::vector<Message> &messages, const StreamCallback &callback)
 void chat(const std::vector<Message> &messages, const GenerateOptions &opts, const StreamCallback &callback)
 ```
 
-Applies the model's embedded chat template, then generates. Falls back to raw concatenation if the model has no template.
+Applies the model's embedded chat template, then generates. Falls back to raw concatenation if the model has no template. Throws `std::runtime_error` if the prompt is too long for the context window or if decoding fails.
+
+#### `tokenize`
+
+```cpp
+std::vector<llama_token> tokenize(const std::string &text) const
+```
+
+Tokenizes the given text and returns the token IDs.
+
+#### `token_count`
+
+```cpp
+size_t token_count(const std::string &text) const
+```
+
+Returns the number of tokens in the given text. Equivalent to `tokenize(text).size()`.
 
 #### `clear_cache`
 
@@ -229,8 +275,6 @@ void clear_cache()
 ```
 
 Clears the KV cache and cached token history for all slots. Use when you want to force full prompt re-processing on the next call.
-
-Throws `std::runtime_error` if the prompt is too long for the context window or if decoding fails.
 
 ### `llamalib::Message`
 

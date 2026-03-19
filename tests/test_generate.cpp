@@ -403,3 +403,76 @@ TEST_CASE("concurrent generate calls with slot pool", "[generate][concurrent]") 
     REQUIRE_FALSE(result.empty());
   }
 }
+
+TEST_CASE("tokenize and token_count", "[tokenize]") {
+  llamalib::Options params;
+  params.n_ctx = 512;
+  llamalib::Llama llm(model_path, params);
+
+  SECTION("tokenize returns non-empty for normal text") {
+    auto tokens = llm.tokenize("Hello, world!");
+    REQUIRE_FALSE(tokens.empty());
+  }
+
+  SECTION("token_count matches tokenize size") {
+    std::string text = "The quick brown fox jumps over the lazy dog.";
+    auto tokens = llm.tokenize(text);
+    auto count = llm.token_count(text);
+    REQUIRE(count == tokens.size());
+  }
+
+  SECTION("empty string returns empty tokens") {
+    auto tokens = llm.tokenize("");
+    // May contain BOS token depending on model
+    REQUIRE(tokens.size() <= 1);
+  }
+
+  SECTION("emoji tokenization works") {
+    std::string emoji;
+    for (int i = 0; i < 10; i++) {
+      emoji += "\xF0\x9F\x98\x80";  // U+1F600
+    }
+    auto count = llm.token_count(emoji);
+    REQUIRE(count > 0);
+  }
+}
+
+TEST_CASE("stop sequences", "[generate][stop]") {
+  llamalib::Options params;
+  params.n_ctx = 512;
+  params.temperature = 0.0f;
+  llamalib::Llama llm(model_path, params);
+
+  SECTION("stop sequence truncates output") {
+    llamalib::GenerateOptions opts;
+    opts.max_tokens = 128;
+    opts.stop = {"\n"};
+
+    auto result = llm.chat("Count from 1 to 10, one per line.", opts);
+    REQUIRE_FALSE(result.empty());
+    // Output should not contain the stop sequence
+    REQUIRE(result.find('\n') == std::string::npos);
+  }
+
+  SECTION("stop sequence works with streaming") {
+    llamalib::GenerateOptions opts;
+    opts.max_tokens = 128;
+    opts.stop = {"\n"};
+
+    std::string streamed;
+    llm.chat("Count from 1 to 10, one per line.", opts,
+             [&](std::string_view token) {
+               streamed += token;
+               return true;
+             });
+    REQUIRE_FALSE(streamed.empty());
+    REQUIRE(streamed.find('\n') == std::string::npos);
+  }
+
+  SECTION("generate without stop sequences still works") {
+    llamalib::GenerateOptions opts;
+    opts.max_tokens = 32;
+    auto result = llm.generate("Hello", opts);
+    REQUIRE_FALSE(result.empty());
+  }
+}
