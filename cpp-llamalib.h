@@ -41,6 +41,12 @@ struct Message {
   std::string content;
 };
 
+struct GenerateOptions {
+  int max_tokens = -1;
+  std::string grammar;       // GBNF grammar string (empty = no constraint)
+  std::string grammar_root;  // Root rule name (default "root")
+};
+
 struct Options {
   int n_gpu_layers = 99;
   int n_ctx = 2048;
@@ -48,6 +54,8 @@ struct Options {
   int n_slots = 1;
   SamplerConfig sampler_config = nullptr;
 };
+
+class ChatSession;
 
 class Llama {
 public:
@@ -108,68 +116,72 @@ public:
     return *this;
   }
 
-  std::string generate(const std::string &prompt) {
-    return generate(prompt, -1);
-  }
-
-  std::string generate(const std::string &prompt, int max_tokens) {
+  std::string generate(const std::string &prompt,
+                       const GenerateOptions &opts = {}) {
     auto guard = slot_guard();
-    return run_inference(guard.slot, prompt, max_tokens, nullptr);
+    return run_inference(guard.slot, prompt, opts, nullptr);
   }
 
   void generate(const std::string &prompt, const StreamCallback &callback) {
-    generate(prompt, -1, callback);
+    generate(prompt, {}, callback);
   }
 
-  void generate(const std::string &prompt, int max_tokens,
+  void generate(const std::string &prompt, const GenerateOptions &opts,
                 const StreamCallback &callback) {
     auto guard = slot_guard();
-    run_inference(guard.slot, prompt, max_tokens, callback);
+    run_inference(guard.slot, prompt, opts, callback);
   }
 
-  // Tier 2: Chat API (applies chat template)
+  inline ChatSession session(const std::string &system_prompt = "");
 
-  std::string chat(const std::string &message) {
-    return chat(std::vector<Message>{{"user", message}});
+  void clear_cache() {
+    std::lock_guard lock(mutex_);
+    auto n = slots_.size();
+    for (size_t i = 0; i < n; i++) {
+      auto slot = std::move(slots_.front());
+      slots_.pop();
+      llama_memory_clear(llama_get_memory(slot.ctx.get()), true);
+      slot.cached_tokens.clear();
+      slots_.push(std::move(slot));
+    }
   }
 
-  std::string chat(const std::string &message, int max_tokens) {
-    return chat(std::vector<Message>{{"user", message}}, max_tokens);
+  std::string chat(const std::string &message,
+                   const GenerateOptions &opts = {}) {
+    return chat(std::vector<Message>{{"user", message}}, opts);
   }
 
   void chat(const std::string &message, const StreamCallback &callback) {
     chat(std::vector<Message>{{"user", message}}, callback);
   }
 
-  void chat(const std::string &message, int max_tokens,
+  void chat(const std::string &message, const GenerateOptions &opts,
             const StreamCallback &callback) {
-    chat(std::vector<Message>{{"user", message}}, max_tokens, callback);
+    chat(std::vector<Message>{{"user", message}}, opts, callback);
   }
 
-  std::string chat(const std::vector<Message> &messages) {
-    return chat(messages, -1);
-  }
-
-  std::string chat(const std::vector<Message> &messages, int max_tokens) {
+  std::string chat(const std::vector<Message> &messages,
+                   const GenerateOptions &opts = {}) {
     auto formatted = apply_chat_template(messages);
-    return generate(formatted, max_tokens);
+    return generate(formatted, opts);
   }
 
   void chat(const std::vector<Message> &messages,
             const StreamCallback &callback) {
-    chat(messages, -1, callback);
+    chat(messages, {}, callback);
   }
 
-  void chat(const std::vector<Message> &messages, int max_tokens,
+  void chat(const std::vector<Message> &messages, const GenerateOptions &opts,
             const StreamCallback &callback) {
     auto formatted = apply_chat_template(messages);
-    generate(formatted, max_tokens, callback);
+    generate(formatted, opts, callback);
   }
 
 private:
   struct Slot {
     llama_context_ptr ctx;
     llama_sampler_ptr smpl;
+    std::vector<llama_token> cached_tokens;
   };
 
   struct SlotGuard {
@@ -207,10 +219,10 @@ private:
   }
 
   std::string apply_chat_template(const std::vector<Message> &messages) const {
+    // Falls back to raw concatenation if the model has no chat template
     auto tmpl = llama_model_chat_template(model_.get(), nullptr);
     if (!tmpl) { return concat_contents(messages); }
 
-    // Convert Message structs to llama_chat_message (pointers into messages)
     std::vector<llama_chat_message> chat_msgs;
     chat_msgs.reserve(messages.size());
     for (const auto &m : messages) {
@@ -231,7 +243,8 @@ private:
   }
 
   std::string run_inference(Slot &slot, const std::string &prompt,
-                            int max_tokens, const StreamCallback &callback) {
+                            const GenerateOptions &opts,
+                            const StreamCallback &callback) {
     llama_sampler_reset(slot.smpl.get());
     auto vocab = llama_model_get_vocab(model_.get());
 
@@ -252,6 +265,7 @@ private:
     tokens.resize(static_cast<size_t>(n));
 
     auto n_ctx = llama_n_ctx(slot.ctx.get());
+    auto max_tokens = opts.max_tokens;
     if (max_tokens < 0) {
       // -1 means generate until EOS or context limit
       max_tokens = static_cast<int>(n_ctx - tokens.size());
@@ -268,11 +282,67 @@ private:
           " max_tokens exceeds context size " + std::to_string(n_ctx));
     }
 
-    llama_memory_clear(llama_get_memory(slot.ctx.get()), true);
-    if (llama_decode(slot.ctx.get(),
-                     llama_batch_get_one(tokens.data(), tokens.size()))) {
-      throw std::runtime_error("llama_decode failed on prompt");
+    // KV cache reuse: find common prefix with cached tokens
+    size_t prefix_len = 0;
+    {
+      auto limit = std::min(slot.cached_tokens.size(), tokens.size());
+      while (prefix_len < limit &&
+             slot.cached_tokens[prefix_len] == tokens[prefix_len]) {
+        ++prefix_len;
+      }
     }
+
+    // Always re-decode at least the last prompt token to get fresh logits
+    if (prefix_len > 0 && prefix_len == tokens.size()) {
+      --prefix_len;
+    }
+
+    if (prefix_len == 0) {
+      llama_memory_clear(llama_get_memory(slot.ctx.get()), true);
+    } else {
+      // Remove everything after prefix (stale prompt tokens + generated tokens)
+      llama_memory_seq_rm(llama_get_memory(slot.ctx.get()), 0,
+                          static_cast<llama_pos>(prefix_len), -1);
+    }
+
+    if (prefix_len < tokens.size()) {
+      if (llama_decode(
+              slot.ctx.get(),
+              llama_batch_get_one(tokens.data() + prefix_len,
+                                  tokens.size() - prefix_len))) {
+        throw std::runtime_error("llama_decode failed on prompt");
+      }
+    }
+    slot.cached_tokens = std::move(tokens);
+
+    // Grammar sampler is inserted at position 0 (before temp/dist)
+    bool has_grammar = !opts.grammar.empty();
+    if (has_grammar) {
+      auto root =
+          opts.grammar_root.empty() ? "root" : opts.grammar_root.c_str();
+      auto *smpl =
+          llama_sampler_init_grammar(vocab, opts.grammar.c_str(), root);
+      auto n_samplers = llama_sampler_chain_n(slot.smpl.get());
+      std::vector<llama_sampler *> existing;
+      for (int si = n_samplers - 1; si >= 0; --si) {
+        existing.push_back(llama_sampler_chain_remove(slot.smpl.get(), si));
+      }
+      llama_sampler_chain_add(slot.smpl.get(), smpl);
+      for (auto it = existing.rbegin(); it != existing.rend(); ++it) {
+        llama_sampler_chain_add(slot.smpl.get(), *it);
+      }
+    }
+
+    struct GrammarGuard {
+      llama_sampler *chain;
+      bool active;
+      ~GrammarGuard() {
+        if (active) {
+          auto *removed = llama_sampler_chain_remove(chain, 0);
+          llama_sampler_free(removed);
+        }
+      }
+    } grammar_guard{slot.smpl.get(), has_grammar};
 
     std::string result;
     std::string piece;
@@ -304,6 +374,7 @@ private:
         throw std::runtime_error("llama_decode failed during generation");
       }
     }
+
     return result;
   }
 
@@ -323,23 +394,20 @@ public:
     }
   }
 
-  std::string say(const std::string &message) {
-    return say_impl(message, [&] { return llm_.chat(history_); });
-  }
-
-  std::string say(const std::string &message, int max_tokens) {
-    return say_impl(message, [&] { return llm_.chat(history_, max_tokens); });
+  std::string say(const std::string &message,
+                  const GenerateOptions &opts = {}) {
+    return say_impl(message, [&] { return llm_.chat(history_, opts); });
   }
 
   void say(const std::string &message, const StreamCallback &callback) {
-    say(message, -1, callback);
+    say(message, {}, callback);
   }
 
-  void say(const std::string &message, int max_tokens,
+  void say(const std::string &message, const GenerateOptions &opts,
            const StreamCallback &callback) {
     say_impl(message, [&] {
       std::string reply;
-      llm_.chat(history_, max_tokens, [&](std::string_view token) {
+      llm_.chat(history_, opts, [&](std::string_view token) {
         reply += token;
         return callback(token);
       });
@@ -377,6 +445,10 @@ private:
   Llama &llm_;
   std::vector<Message> history_;
 };
+
+inline ChatSession Llama::session(const std::string &system_prompt) {
+  return ChatSession(*this, system_prompt);
+}
 
 } // namespace llamalib
 

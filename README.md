@@ -10,6 +10,8 @@ Just include **cpp-llamalib.h** to call llama.cpp with a simple, high-level API.
 - Header-only — single file, no build step for the wrapper itself
 - Two-tier API: raw `generate()` and template-aware `chat()`
 - `ChatSession` wrapper for multi-turn conversations
+- KV cache reuse — shared prompt prefixes are not re-processed
+- Structured output via GBNF grammar constraints
 - Thread-safe concurrent generation via slot pool
 - Custom sampler configuration
 
@@ -55,10 +57,10 @@ auto r2 = llm.chat(messages);
 
 ### ChatSession
 
-`ChatSession` manages conversation history automatically.
+`ChatSession` manages conversation history automatically. Create one via `Llama::session()`.
 
 ```cpp
-llamalib::ChatSession session(llm, "You are a C++ expert.");
+auto session = llm.session("You are a C++ expert.");
 auto r1 = session.say("What is a smart pointer?");
 auto r2 = session.say("How does unique_ptr differ from shared_ptr?");
 
@@ -74,6 +76,30 @@ llm.chat("Write a haiku about the sea.", [](std::string_view token) {
     std::cout << token << std::flush;
     return true;  // return false to stop early
 });
+```
+
+### Structured output (GBNF grammar)
+
+Use `GenerateOptions` with a GBNF grammar string to constrain model output. Works with `generate()`, `chat()`, and `ChatSession::say()`.
+
+```cpp
+llamalib::GenerateOptions opts;
+opts.max_tokens = 32;
+opts.grammar = R"(root ::= "yes" | "no")";
+
+auto answer = llm.chat("Is the sky blue?", opts);
+// answer is guaranteed to be "yes" or "no"
+```
+
+### KV cache reuse
+
+KV cache is automatically reused across calls on the same slot. When consecutive prompts share a common prefix (e.g. multi-turn chat), only the new tokens are decoded — previous KV entries are kept. Use `clear_cache()` to explicitly reset all slots.
+
+```cpp
+llm.generate("The quick brown fox jumps", {16});  // full decode
+llm.generate("The quick brown fox runs", {16});   // only re-decodes "runs"
+
+llm.clear_cache();  // force full re-processing on next call
 ```
 
 ### Custom parameters
@@ -152,6 +178,14 @@ llamalib::Llama llm("model.gguf", opts);
 | `n_slots` | `int` | `1` | Number of concurrent generation slots |
 | `sampler_config` | `SamplerConfig` | `nullptr` | Custom sampler chain configuration callback |
 
+### `llamalib::GenerateOptions`
+
+| Field | Type | Default | Description |
+| ----- | ---- | ------- | ----------- |
+| `max_tokens` | `int` | `-1` | Maximum tokens to generate (-1 = until EOS or context limit) |
+| `grammar` | `std::string` | `""` | GBNF grammar string (empty = no constraint) |
+| `grammar_root` | `std::string` | `""` | Root rule name (defaults to `"root"`) |
+
 ### `llamalib::Llama`
 
 #### Constructor
@@ -165,10 +199,9 @@ Loads the model and creates context/sampler slots. Throws `std::runtime_error` o
 #### `generate`
 
 ```cpp
-std::string generate(const std::string &prompt)
-std::string generate(const std::string &prompt, int max_tokens)
+std::string generate(const std::string &prompt, const GenerateOptions &opts = {})
 void generate(const std::string &prompt, const StreamCallback &callback)
-void generate(const std::string &prompt, int max_tokens, const StreamCallback &callback)
+void generate(const std::string &prompt, const GenerateOptions &opts, const StreamCallback &callback)
 ```
 
 Raw text completion — sends the prompt directly without chat template formatting. Thread-safe.
@@ -177,24 +210,25 @@ Raw text completion — sends the prompt directly without chat template formatti
 
 ```cpp
 // Single message (auto-wrapped as "user" role)
-std::string chat(const std::string &message)
-std::string chat(const std::string &message, int max_tokens)
+std::string chat(const std::string &message, const GenerateOptions &opts = {})
 void chat(const std::string &message, const StreamCallback &callback)
-void chat(const std::string &message, int max_tokens, const StreamCallback &callback)
+void chat(const std::string &message, const GenerateOptions &opts, const StreamCallback &callback)
 
 // Multi-turn
-std::string chat(const std::vector<Message> &messages)
-std::string chat(const std::vector<Message> &messages, int max_tokens)
+std::string chat(const std::vector<Message> &messages, const GenerateOptions &opts = {})
 void chat(const std::vector<Message> &messages, const StreamCallback &callback)
-void chat(const std::vector<Message> &messages, int max_tokens, const StreamCallback &callback)
+void chat(const std::vector<Message> &messages, const GenerateOptions &opts, const StreamCallback &callback)
 ```
 
 Applies the model's embedded chat template, then generates. Falls back to raw concatenation if the model has no template.
 
-#### Common parameters
+#### `clear_cache`
 
-- `max_tokens` — maximum tokens to generate; defaults to `-1` (generate until EOS or context limit)
-- `callback` — called with each token as it is generated; return `false` to stop early
+```cpp
+void clear_cache()
+```
+
+Clears the KV cache and cached token history for all slots. Use when you want to force full prompt re-processing on the next call.
 
 Throws `std::runtime_error` if the prompt is too long for the context window or if decoding fails.
 
@@ -209,18 +243,19 @@ struct Message {
 
 ### `llamalib::ChatSession`
 
+Created via `Llama::session()`:
+
 ```cpp
-ChatSession(Llama &llm, const std::string &system_prompt = "")
+auto session = llm.session("You are a helpful assistant.");
 ```
 
 Wraps `Llama::chat()` with automatic conversation history management.
 
 | Method | Description |
 | ------ | ----------- |
-| `say(message)` | Appends user message, calls `chat()`, appends assistant reply, returns reply |
-| `say(message, max_tokens)` | Same with max_tokens override |
+| `say(message, opts = {})` | Appends user message, calls `chat()`, appends assistant reply, returns reply |
 | `say(message, callback)` | Streaming version (void); history is still updated internally |
-| `say(message, max_tokens, callback)` | Same with max_tokens override |
+| `say(message, opts, callback)` | Streaming with options |
 | `history()` | Returns `const std::vector<Message>&` of the conversation |
 | `clear()` | Clears history (preserves system prompt if set) |
 

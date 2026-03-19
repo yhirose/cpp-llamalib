@@ -20,7 +20,7 @@ TEST_CASE("Llama move semantics", "[llm][move]") {
   llamalib::Llama original(model_path, params);
   llamalib::Llama moved(std::move(original));
 
-  auto result = moved.generate("Hello", 16);
+  auto result = moved.generate("Hello", {16});
   REQUIRE_FALSE(result.empty());
 }
 
@@ -48,20 +48,20 @@ TEST_CASE("generate produces output", "[generate]") {
   llamalib::Llama llm(model_path, params);
 
   SECTION("returns non-empty string") {
-    auto result = llm.generate("Hello", 32);
+    auto result = llm.generate("Hello", {32});
     REQUIRE_FALSE(result.empty());
   }
 
   SECTION("respects max_tokens") {
-    auto short_result = llm.generate("Tell me a story", 8);
-    auto long_result = llm.generate("Tell me a story", 64);
+    auto short_result = llm.generate("Tell me a story", {8});
+    auto long_result = llm.generate("Tell me a story", {64});
     // Shorter max_tokens should generally produce shorter or equal output
     REQUIRE(short_result.size() <= long_result.size() + 32);
   }
 
   SECTION("different prompts produce different outputs") {
-    auto result1 = llm.generate("What is 1+1?", 32);
-    auto result2 = llm.generate("Write a poem about the sea", 32);
+    auto result1 = llm.generate("What is 1+1?", {32});
+    auto result2 = llm.generate("Write a poem about the sea", {32});
     REQUIRE(result1 != result2);
   }
 }
@@ -79,7 +79,7 @@ TEST_CASE("long prompt tokenization", "[generate]") {
     long_prompt += "\xF0\x9F\x98\x80";  // U+1F600 grinning face
   }
 
-  REQUIRE_NOTHROW(llm.generate(long_prompt, 8));
+  REQUIRE_NOTHROW(llm.generate(long_prompt, {8}));
 }
 
 TEST_CASE("sampler reset produces consistent results", "[generate]") {
@@ -89,8 +89,8 @@ TEST_CASE("sampler reset produces consistent results", "[generate]") {
   params.n_slots = 1;
   llamalib::Llama llm(model_path, params);
 
-  auto result1 = llm.generate("What is 2+2?", 32);
-  auto result2 = llm.generate("What is 2+2?", 32);
+  auto result1 = llm.generate("What is 2+2?", {32});
+  auto result2 = llm.generate("What is 2+2?", {32});
   REQUIRE(result1 == result2);
 }
 
@@ -114,7 +114,7 @@ TEST_CASE("streaming generate", "[generate][streaming]") {
 
   SECTION("callback receives tokens") {
     std::string streamed;
-    llm.generate("Hello", 32, [&](std::string_view token) {
+    llm.generate("Hello", {32}, [&](std::string_view token) {
       streamed += token;
       return true;
     });
@@ -123,7 +123,7 @@ TEST_CASE("streaming generate", "[generate][streaming]") {
 
   SECTION("returning false from callback stops generation early") {
     int count = 0;
-    llm.generate("Tell me a long story", 32, [&](std::string_view) {
+    llm.generate("Tell me a long story", {32}, [&](std::string_view) {
       return ++count < 3;
     });
     REQUIRE(count == 3);
@@ -140,8 +140,8 @@ TEST_CASE("custom sampler configuration", "[generate][sampler]") {
   };
   llamalib::Llama llm(model_path, params);
 
-  auto r1 = llm.generate("What is 2+2?", 16);
-  auto r2 = llm.generate("What is 2+2?", 16);
+  auto r1 = llm.generate("What is 2+2?", {16});
+  auto r2 = llm.generate("What is 2+2?", {16});
   REQUIRE_FALSE(r1.empty());
   // With fixed seed, results should be deterministic
   REQUIRE(r1 == r2);
@@ -154,8 +154,8 @@ TEST_CASE("multiple Llama instances coexist", "[llm]") {
   llamalib::Llama llm1(model_path, params);
   llamalib::Llama llm2(model_path, params);
 
-  auto r1 = llm1.generate("Hello", 16);
-  auto r2 = llm2.generate("Hello", 16);
+  auto r1 = llm1.generate("Hello", {16});
+  auto r2 = llm2.generate("Hello", {16});
 
   REQUIRE_FALSE(r1.empty());
   REQUIRE_FALSE(r2.empty());
@@ -178,13 +178,13 @@ TEST_CASE("chat applies template", "[chat][chat_template]") {
   llamalib::Llama llm(model_path, params);
 
   SECTION("single message chat produces output") {
-    auto result = llm.chat("What is 2+2?", 32);
+    auto result = llm.chat("What is 2+2?", {32});
     REQUIRE_FALSE(result.empty());
   }
 
   SECTION("deterministic chat output") {
-    auto r1 = llm.chat("Say hello", 32);
-    auto r2 = llm.chat("Say hello", 32);
+    auto r1 = llm.chat("Say hello", {32});
+    auto r2 = llm.chat("Say hello", {32});
     REQUIRE(r1 == r2);
   }
 
@@ -214,7 +214,7 @@ TEST_CASE("chat with multi-turn messages", "[chat][chat_template]") {
         {"assistant", "Hello Alice! How can I help you?"},
         {"user", "What is my name?"},
     };
-    auto result = llm.chat(messages, 32);
+    auto result = llm.chat(messages, {32});
     REQUIRE_FALSE(result.empty());
   }
 
@@ -223,7 +223,7 @@ TEST_CASE("chat with multi-turn messages", "[chat][chat_template]") {
         {"system", "You are a helpful assistant."},
         {"user", "Hello"},
     };
-    auto result = llm.chat(messages, 32);
+    auto result = llm.chat(messages, {32});
     REQUIRE_FALSE(result.empty());
   }
 }
@@ -234,17 +234,17 @@ TEST_CASE("ChatSession wrapper", "[conversation]") {
   llamalib::Llama llm(model_path, params);
 
   SECTION("basic multi-turn conversation") {
-    llamalib::ChatSession conv(llm, "You are a helpful assistant.");
-    auto r1 = conv.say("Hello", 32);
+    auto conv = llm.session("You are a helpful assistant.");
+    auto r1 = conv.say("Hello", {32});
     REQUIRE_FALSE(r1.empty());
-    auto r2 = conv.say("How are you?", 32);
+    auto r2 = conv.say("How are you?", {32});
     REQUIRE_FALSE(r2.empty());
   }
 
   SECTION("history is accumulated correctly") {
-    llamalib::ChatSession conv(llm, "System prompt.");
-    conv.say("First message", 16);
-    conv.say("Second message", 16);
+    auto conv = llm.session("System prompt.");
+    conv.say("First message", {16});
+    conv.say("Second message", {16});
     auto &h = conv.history();
     REQUIRE(h.size() == 5); // system + 2*(user + assistant)
     REQUIRE(h[0].role == "system");
@@ -255,8 +255,8 @@ TEST_CASE("ChatSession wrapper", "[conversation]") {
   }
 
   SECTION("clear preserves system prompt") {
-    llamalib::ChatSession conv(llm, "Keep this.");
-    conv.say("Hello", 16);
+    auto conv = llm.session("Keep this.");
+    conv.say("Hello", {16});
     REQUIRE(conv.history().size() == 3);
     conv.clear();
     REQUIRE(conv.history().size() == 1);
@@ -265,13 +265,116 @@ TEST_CASE("ChatSession wrapper", "[conversation]") {
   }
 
   SECTION("clear without system prompt") {
-    llamalib::ChatSession conv(llm);
-    conv.say("Hello", 16);
+    auto conv = llm.session();
+    conv.say("Hello", {16});
     REQUIRE(conv.history().size() == 2);
     conv.clear();
     REQUIRE(conv.history().empty());
   }
 
+}
+
+TEST_CASE("KV cache reuse produces correct results", "[generate][kv_cache]") {
+  llamalib::Options params;
+  params.n_ctx = 512;
+  params.temperature = 0.0f;
+  params.n_slots = 1;
+  llamalib::Llama llm(model_path, params);
+
+  SECTION("same prompt twice gives identical results with cache reuse") {
+    auto r1 = llm.generate("What is 2+2?", {32});
+    auto r2 = llm.generate("What is 2+2?", {32});
+    REQUIRE_FALSE(r1.empty());
+    REQUIRE(r1 == r2);
+  }
+
+  SECTION("different prompt after cached prompt works correctly") {
+    auto r1 = llm.generate("Hello world", {16});
+    auto r2 = llm.generate("Goodbye world", {16});
+    REQUIRE_FALSE(r1.empty());
+    REQUIRE_FALSE(r2.empty());
+  }
+
+  SECTION("shared prefix reuses cache") {
+    auto r1 = llm.generate("The quick brown fox jumps", {16});
+    auto r2 = llm.generate("The quick brown fox runs", {16});
+    REQUIRE_FALSE(r1.empty());
+    REQUIRE_FALSE(r2.empty());
+  }
+
+  SECTION("clear_cache resets state") {
+    llm.generate("Hello", {16});
+    llm.clear_cache();
+    auto r = llm.generate("Hello", {16});
+    REQUIRE_FALSE(r.empty());
+  }
+}
+
+TEST_CASE("ChatSession with KV cache reuse", "[conversation][kv_cache]") {
+  llamalib::Options params;
+  params.n_ctx = 1024;
+  params.temperature = 0.0f;
+  llamalib::Llama llm(model_path, params);
+
+  llamalib::ChatSession conv(llm, "You are a helpful assistant.");
+  auto r1 = conv.say("My name is Bob.", {32});
+  REQUIRE_FALSE(r1.empty());
+  auto r2 = conv.say("What did I just tell you?", {32});
+  REQUIRE_FALSE(r2.empty());
+  auto r3 = conv.say("Say goodbye.", {32});
+  REQUIRE_FALSE(r3.empty());
+}
+
+TEST_CASE("structured output with GBNF grammar", "[generate][grammar]") {
+  llamalib::Options params;
+  params.n_ctx = 512;
+  params.temperature = 0.0f;
+  llamalib::Llama llm(model_path, params);
+
+  // Simple grammar: only yes or no
+  std::string yesno_grammar = "root ::= \"yes\" | \"no\"";
+
+  SECTION("grammar constrains output") {
+    llamalib::GenerateOptions opts;
+    opts.max_tokens = 8;
+    opts.grammar = yesno_grammar;
+
+    auto result = llm.chat("Is the sky blue? Answer only yes or no.", opts);
+    REQUIRE_FALSE(result.empty());
+    REQUIRE((result == "yes" || result == "no"));
+  }
+
+  SECTION("generate without grammar still works") {
+    llamalib::GenerateOptions opts;
+    opts.max_tokens = 16;
+    auto result = llm.generate("Hello", opts);
+    REQUIRE_FALSE(result.empty());
+  }
+
+  SECTION("GenerateOptions with callback") {
+    llamalib::GenerateOptions opts;
+    opts.max_tokens = 16;
+    std::string streamed;
+    llm.generate("Hello", opts, [&](std::string_view token) {
+      streamed += token;
+      return true;
+    });
+    REQUIRE_FALSE(streamed.empty());
+  }
+}
+
+TEST_CASE("ChatSession with GenerateOptions", "[conversation][grammar]") {
+  llamalib::Options params;
+  params.n_ctx = 512;
+  params.temperature = 0.0f;
+  llamalib::Llama llm(model_path, params);
+
+  auto conv = llm.session();
+  llamalib::GenerateOptions opts;
+  opts.max_tokens = 32;
+  auto result = conv.say("Hello", opts);
+  REQUIRE_FALSE(result.empty());
+  REQUIRE(conv.history().size() == 2);
 }
 
 TEST_CASE("concurrent generate calls with slot pool", "[generate][concurrent]") {
@@ -284,7 +387,7 @@ TEST_CASE("concurrent generate calls with slot pool", "[generate][concurrent]") 
   for (int i = 0; i < 4; i++) {
     futures.push_back(
         std::async(std::launch::async, [&llm] {
-          return llm.generate("Hi", 16);
+          return llm.generate("Hi", {16});
         }));
   }
 
