@@ -23,10 +23,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: build/_deps
-          key: deps-${{ hashFiles('CMakeLists.txt') }}
+          key: deps-native-off-${{ hashFiles('CMakeLists.txt') }}
 
       - name: Configure
-        run: cmake -B build
+        run: cmake -B build -DGGML_NATIVE=OFF
 
       - name: Build
         run: cmake --build build -j$(nproc)
