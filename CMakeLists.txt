@@ -1,5 +1,22 @@
 cmake_minimum_required(VERSION 3.16)
-project(cpp-llamalib-tests LANGUAGES CXX)
+project(cpp-llamalib LANGUAGES CXX)
+
+# ---------------------------------------------------------------------------
+# Library target (header-only wrapper around llama.cpp)
+# ---------------------------------------------------------------------------
+macro(create_cpp_llamalib_target)
+  add_library(cpp-llamalib INTERFACE)
+  target_include_directories(cpp-llamalib INTERFACE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+  )
+  target_link_libraries(cpp-llamalib INTERFACE llama)
+endmacro()
+
+# When used as a subproject, the parent must provide the llama target
+if(NOT CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+  create_cpp_llamalib_target()
+  return()
+endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -47,6 +64,8 @@ set(LLAMA_BUILD_SERVER OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(llama_cpp)
 
+create_cpp_llamalib_target()
+
 # Fetch Catch2
 FetchContent_Declare(
   Catch2
@@ -58,14 +77,9 @@ FetchContent_MakeAvailable(Catch2)
 # Test executable
 add_executable(tests tests/test_generate.cpp)
 
-target_include_directories(tests PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}
-)
-
 target_link_libraries(tests PRIVATE
   Catch2::Catch2WithMain
-  llama
-  ggml
+  cpp-llamalib
 )
 
 target_compile_definitions(tests PRIVATE
