@@ -5,7 +5,7 @@
 A C++17 single-file header-only wrapper for [llama.cpp](https://github.com/ggml-org/llama.cpp).<br>
 Just include **cpp-llamalib.h** to call llama.cpp with a simple, high-level API.
 
-This library is used for writing ["Building a Desktop LLM App with cpp-httplib"](https://yhirose.github.io/cpp-httplib/en/llm-app/).
+This library is used in ["Building a Desktop LLM App with cpp-httplib"](https://yhirose.github.io/cpp-httplib/en/llm-app/).
 
 ## Features
 
