@@ -21,9 +21,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          latest=$(gh api repos/ggml-org/llama.cpp/releases/latest --jq '.tag_name')
-          latest_date=$(gh api repos/ggml-org/llama.cpp/releases/latest --jq '.published_at[:10]')
-          current=$(grep -oP 'GIT_TAG\s+\K\S+' CMakeLists.txt)
+          latest=$(gh api repos/ggml-org/llama.cpp/releases/latest --jq '.tag_name' | tr -d '\n\r')
+          latest_date=$(gh api repos/ggml-org/llama.cpp/releases/latest --jq '.published_at[:10]' | tr -d '\n\r')
+          current=$(grep -oP 'GIT_TAG\s+\K\S+' CMakeLists.txt | tr -d '\n\r')
           echo "latest=$latest" >> "$GITHUB_OUTPUT"
           echo "latest_date=$latest_date" >> "$GITHUB_OUTPUT"
           echo "current=$current" >> "$GITHUB_OUTPUT"
