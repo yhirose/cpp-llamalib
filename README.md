@@ -24,7 +24,7 @@ This library is used in ["Building a Desktop LLM App with cpp-httplib"](https://
 Please copy `cpp-llamalib.h` into your project and `#include` it.
 
 Your project must link against llama.cpp (`llama` and `ggml` libraries).<br>
-Tested against llama.cpp [b8400](https://github.com/ggml-org/llama.cpp/releases/tag/b8400), 2026-03-17.
+Tested against llama.cpp [b8493](https://github.com/ggml-org/llama.cpp/releases/tag/b8493), 2026-03-23.
 
 ## Examples
 
