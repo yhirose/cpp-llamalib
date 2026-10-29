@@ -75,7 +75,7 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(Catch2)
 
 # Test executable
-add_executable(tests tests/test_generate.cpp)
+add_executable(tests tests/test_generate.cpp tests/test_result.cpp)
 
 target_link_libraries(tests PRIVATE
   Catch2::Catch2WithMain
