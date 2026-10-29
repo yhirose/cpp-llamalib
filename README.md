@@ -18,13 +18,15 @@ This library is used in ["Building a Desktop LLM App with cpp-httplib"](https://
 - Structured output via GBNF grammar constraints
 - Thread-safe concurrent generation via slot pool
 - Custom sampler configuration
+- `Result` with the finish reason and token counts; per-call temperature, seed and sampler
+- Typed errors (`ModelLoadError`, `ContextOverflowError`, ...), all `std::runtime_error`
 
 ## Integration
 
 Please copy `cpp-llamalib.h` into your project and `#include` it.
 
 Your project must link against llama.cpp (`llama` and `ggml` libraries).<br>
-Tested against llama.cpp [v0.7.0](https://github.com/ggml-org/llama.cpp/releases/tag/v0.7.0), 2026-10-15.
+Tested against llama.cpp [v0.8.0](https://github.com/ggml-org/llama.cpp/releases/tag/v0.8.0), 2026-10-28.
 
 ## Examples
 
@@ -126,11 +128,46 @@ if (llm.token_count(prompt) > 1800) {
 
 KV cache is automatically reused across calls on the same slot. When consecutive prompts share a common prefix (e.g. multi-turn chat), only the new tokens are decoded — previous KV entries are kept. Use `clear_cache()` to explicitly reset all slots.
 
+A prompt the cache already holds is decoded again from its last token alone, which can differ in the last digits from decoding it whole, and on some prompts that changes even a greedy answer (`Hello`, then `Greetings.`). When the same prompt and settings must give the same text however many calls came before, set `GenerateOptions::reuse_cache = false` — the call then starts from an empty cache.
+
 ```cpp
 llm.generate("The quick brown fox jumps", {16});  // full decode
 llm.generate("The quick brown fox runs", {16});   // only re-decodes "runs"
 
 llm.clear_cache();  // force full re-processing on next call
+```
+
+### Result: how a generation ended
+
+`complete()` and `chat_complete()` return a `Result` — the text, why it ended, and the token counts. With a callback, the text is streamed to it as well.
+
+```cpp
+auto r = llm.complete("Hello", {32});
+r.text;                 // the generated text
+r.finish;               // FinishReason::end, length, stop or aborted
+r.prompt_tokens;        // the prompt's tokens, whether or not the cache held them
+r.completion_tokens;    // tokens generated, not counting the end-of-generation token
+```
+
+| `FinishReason` | Meaning |
+| -------------- | ------- |
+| `end` | the model produced an end-of-generation token |
+| `length` | `max_tokens` (or the context) ran out |
+| `stop` | a stop sequence appeared; it is not in the text |
+| `aborted` | the stream callback returned `false` (it is not called again) |
+
+### Per-call sampling
+
+`temperature` and `seed` in `GenerateOptions` apply to one call. With either, the call samples with a chain of its own (temperature, then a seeded draw) instead of the one the model was made with; the temperature defaults to `Options::temperature`. A `sampler_config` in `GenerateOptions` replaces the whole chain for the call and wins over both.
+
+```cpp
+llamalib::GenerateOptions o;
+o.temperature = 0.0f;                 // greedy, for this call
+auto a = llm.generate("Hello", o);
+
+o.temperature = 1.0f;
+o.seed = 42;                          // the same seed gives the same draw
+auto b = llm.generate("Hello", o);
 ```
 
 ### Custom parameters
@@ -148,22 +185,32 @@ llamalib::Llama llm("model.gguf", opts);
 
 ### Error handling
 
-All errors are reported as `std::runtime_error` — invalid model paths, tokenization failures, and context overflow.
+Everything this library throws is a `llamalib::Error`, which is a `std::runtime_error`, so catching `std::runtime_error` still works.
+
+| Type | When |
+| ---- | ---- |
+| `ModelLoadError` | the model file cannot be loaded, or a context cannot be made for it |
+| `ContextOverflowError` | the prompt, with the tokens asked for, does not fit the context |
+| `TemplateError` | the chat template cannot be applied (only with `Options::strict_chat_template`) |
+| `DecodeError` | `llama_decode` failed |
+| `Error` | anything else (e.g. tokenization failed) |
 
 ```cpp
 try {
     llamalib::Llama llm("/bad/path.gguf");
-} catch (const std::runtime_error &e) {
+} catch (const llamalib::ModelLoadError &e) {
     // "Failed to load model"
 }
 
 try {
     // Throws if prompt + max_tokens exceeds context size
     auto result = llm.generate(very_long_prompt);
-} catch (const std::runtime_error &e) {
+} catch (const llamalib::ContextOverflowError &e) {
     // "Prompt too long: 1024 prompt tokens + 512 max_tokens exceeds context size 1024"
 }
 ```
+
+llama.cpp rounds the context size up (to a multiple of 256), so ask `llm.n_ctx()` for the size the model got. A prompt longer than `n_batch` is decoded in pieces of that size.
 
 ### Concurrent generation
 
@@ -208,6 +255,9 @@ llamalib::Llama llm("model.gguf", opts);
 | `temperature` | `float` | `0.3f` | Sampling temperature |
 | `n_slots` | `int` | `1` | Number of concurrent generation slots |
 | `sampler_config` | `SamplerConfig` | `nullptr` | Custom sampler chain configuration callback |
+| `cpu_only` | `bool` | `false` | Leave the GPUs out of the devices the model may use |
+| `strict_chat_template` | `bool` | `false` | Throw `TemplateError` when the chat template cannot be applied, instead of joining the messages' contents |
+| `n_batch` | `int` | `0` | Tokens decoded at a time (0 = llama.cpp's default); a longer prompt is decoded in pieces |
 
 ### `llamalib::GenerateOptions`
 
@@ -217,6 +267,10 @@ llamalib::Llama llm("model.gguf", opts);
 | `grammar` | `std::string` | `""` | GBNF grammar string (empty = no constraint) |
 | `grammar_root` | `std::string` | `""` | Root rule name (defaults to `"root"`) |
 | `stop` | `std::vector<std::string>` | `{}` | Stop sequences (generation stops when any appears; empty strings are ignored) |
+| `temperature` | `std::optional<float>` | none | Temperature for this call (see Per-call sampling) |
+| `seed` | `std::optional<uint32_t>` | none | Seed for this call's draw |
+| `sampler_config` | `SamplerConfig` | `nullptr` | The whole sampler chain for this call |
+| `reuse_cache` | `bool` | `true` | `false` starts the call from an empty cache |
 
 ### `llamalib::Llama`
 
@@ -226,7 +280,34 @@ llamalib::Llama llm("model.gguf", opts);
 Llama(const std::string &model_path, const Options &params = {})
 ```
 
-Loads the model and creates context/sampler slots. Throws `std::runtime_error` on failure.
+Loads the model and creates context/sampler slots. Throws `ModelLoadError` (a `std::runtime_error`) on failure.
+
+#### `complete` and `chat_complete`
+
+```cpp
+Result complete(const std::string &prompt, const GenerateOptions &opts = {}, const StreamCallback &callback = nullptr)
+Result chat_complete(const std::vector<Message> &messages, const GenerateOptions &opts = {}, const StreamCallback &callback = nullptr)
+```
+
+Like `generate` and `chat`, and they return a `Result`. `generate` and `chat` are these with the text taken out.
+
+#### `format_chat`
+
+```cpp
+std::string format_chat(const std::vector<Message> &messages) const
+```
+
+The prompt the model's chat template makes of the messages, ready for `generate`, `complete` or `token_count`.
+
+#### `model`, `n_ctx`, `n_batch`
+
+```cpp
+const llama_model *model() const
+int n_ctx() const    // the context size the model got, which may be rounded up from Options::n_ctx
+int n_batch() const  // tokens decoded at a time
+```
+
+The model is offered for what this library does not wrap. The contexts are not: each belongs to a slot that a running call holds.
 
 #### `generate`
 
@@ -236,7 +317,7 @@ void generate(const std::string &prompt, const StreamCallback &callback)
 void generate(const std::string &prompt, const GenerateOptions &opts, const StreamCallback &callback)
 ```
 
-Raw text completion — sends the prompt directly without chat template formatting. Thread-safe. Throws `std::runtime_error` if the prompt is too long for the context window or if decoding fails.
+Raw text completion — sends the prompt directly without chat template formatting. Thread-safe. Throws `ContextOverflowError` if the prompt is too long for the context window, `DecodeError` if decoding fails.
 
 #### `chat`
 
@@ -252,7 +333,7 @@ void chat(const std::vector<Message> &messages, const StreamCallback &callback)
 void chat(const std::vector<Message> &messages, const GenerateOptions &opts, const StreamCallback &callback)
 ```
 
-Applies the model's embedded chat template, then generates. Falls back to raw concatenation if the model has no template. Throws `std::runtime_error` if the prompt is too long for the context window or if decoding fails.
+Applies the model's embedded chat template, then generates. Falls back to raw concatenation if the model has no template (or throws `TemplateError` with `Options::strict_chat_template`). Throws `ContextOverflowError` if the prompt is too long for the context window, `DecodeError` if decoding fails.
 
 #### `tokenize`
 

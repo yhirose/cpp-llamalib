@@ -4,10 +4,13 @@
 #include "llama.h"
 #include "llama-cpp.h"
 
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <stdexcept>
 #include <string>
@@ -29,6 +32,27 @@ inline void backend_free() {
 }
 } // namespace detail
 
+// Everything this library throws is an Error, which is a std::runtime_error.
+struct Error : std::runtime_error {
+  using std::runtime_error::runtime_error;
+};
+// The model file could not be loaded, or a context could not be made for it.
+struct ModelLoadError : Error {
+  using Error::Error;
+};
+// The prompt, with the tokens asked for, does not fit the context.
+struct ContextOverflowError : Error {
+  using Error::Error;
+};
+// The model's chat template could not be applied (see Options::strict_chat_template).
+struct TemplateError : Error {
+  using Error::Error;
+};
+// llama_decode failed.
+struct DecodeError : Error {
+  using Error::Error;
+};
+
 // Callback to stream tokens during generation. Return false to stop early.
 using StreamCallback = std::function<bool(std::string_view token)>;
 
@@ -46,6 +70,19 @@ struct GenerateOptions {
   std::string grammar;       // GBNF grammar string (empty = no constraint)
   std::string grammar_root;  // Root rule name (default "root")
   std::vector<std::string> stop;  // Stop sequences (generation stops when any appears)
+  // For this call only. With either of these, the call samples with a chain of
+  // its own (temperature, then a seeded draw) in place of the one the model was
+  // made with; the temperature then defaults to Options::temperature.
+  std::optional<float> temperature;
+  std::optional<uint32_t> seed;
+  // For this call only: the whole sampler chain, as Options::sampler_config.
+  // It wins over temperature and seed.
+  SamplerConfig sampler_config = nullptr;
+  // Start from an empty cache. A prompt the cache already holds is decoded
+  // again from its last token alone, which can differ in the last digits from
+  // decoding it whole; with false, the same prompt and settings give the same
+  // text however many calls came before.
+  bool reuse_cache = true;
 };
 
 struct Options {
@@ -54,6 +91,29 @@ struct Options {
   float temperature = 0.3f;
   int n_slots = 1;
   SamplerConfig sampler_config = nullptr;
+  // Leave the GPUs out of the devices the model may use.
+  bool cpu_only = false;
+  // Throw TemplateError when the chat template cannot be applied, instead of
+  // joining the messages' contents as they are.
+  bool strict_chat_template = false;
+  // Tokens decoded at a time (0 = llama.cpp's default). A longer prompt is
+  // decoded in pieces of this size.
+  int n_batch = 0;
+};
+
+// Why a generation ended.
+enum class FinishReason {
+  end,      // the model produced an end-of-generation token
+  length,   // max_tokens (or the context) ran out
+  stop,     // a stop sequence appeared; it is not in the text
+  aborted,  // the stream callback returned false
+};
+
+struct Result {
+  std::string text;
+  FinishReason finish = FinishReason::end;
+  int prompt_tokens = 0;      // the prompt's tokens, whether or not the cache held them
+  int completion_tokens = 0;  // tokens generated, not counting the end-of-generation token
 };
 
 class ChatSession;
@@ -66,16 +126,23 @@ public:
 
     auto model_params = llama_model_default_params();
     model_params.n_gpu_layers = params.n_gpu_layers;
+    // A null-terminated list of the devices the model may use; the CPU is
+    // always available, so an empty list keeps the model off the GPUs.
+    static ggml_backend_dev_t no_devices[1] = {nullptr};
+    if (params.cpu_only) { model_params.devices = no_devices; }
     model_ = llama_model_ptr{
         llama_model_load_from_file(model_path.c_str(), model_params)};
-    if (!model_) { throw std::runtime_error("Failed to load model"); }
+    if (!model_) { throw ModelLoadError("Failed to load model"); }
 
     for (auto i = 0; i < params.n_slots; i++) {
       auto ctx_params = llama_context_default_params();
       ctx_params.n_ctx = params.n_ctx;
+      if (params.n_batch > 0) { ctx_params.n_batch = params.n_batch; }
       auto ctx =
           llama_context_ptr{llama_init_from_model(model_.get(), ctx_params)};
-      if (!ctx) { throw std::runtime_error("Failed to create context"); }
+      if (!ctx) { throw ModelLoadError("Failed to create context"); }
+      n_ctx_ = static_cast<int>(llama_n_ctx(ctx.get()));
+      n_batch_ = static_cast<int>(llama_n_batch(ctx.get()));
 
       auto smpl = llama_sampler_ptr{
           llama_sampler_chain_init(llama_sampler_chain_default_params())};
@@ -101,6 +168,8 @@ public:
 
   Llama(Llama &&other) noexcept
       : params_(other.params_),
+        n_ctx_(other.n_ctx_),
+        n_batch_(other.n_batch_),
         model_(std::move(other.model_)),
         slots_(std::move(other.slots_)) {}
 
@@ -111,16 +180,42 @@ public:
       if (model_) { detail::backend_free(); }
       model_.reset();
       params_ = other.params_;
+      n_ctx_ = other.n_ctx_;
+      n_batch_ = other.n_batch_;
       model_ = std::move(other.model_);
       slots_ = std::move(other.slots_);
     }
     return *this;
   }
 
+  // The model, for what this library does not wrap. The contexts are not
+  // offered: each belongs to a slot that a running call holds.
+  const llama_model *model() const { return model_.get(); }
+
+  // The context size the model got, which llama.cpp may round up from
+  // Options::n_ctx.
+  int n_ctx() const { return n_ctx_; }
+
+  // Tokens decoded at a time, as the context has it.
+  int n_batch() const { return n_batch_; }
+
+  // The text, and how the generation ended. With a callback, the text is
+  // streamed to it as well.
+  Result complete(const std::string &prompt, const GenerateOptions &opts = {},
+                  const StreamCallback &callback = nullptr) {
+    auto guard = slot_guard();
+    return run_inference(guard.slot, prompt, opts, callback);
+  }
+
+  Result chat_complete(const std::vector<Message> &messages,
+                       const GenerateOptions &opts = {},
+                       const StreamCallback &callback = nullptr) {
+    return complete(format_chat(messages), opts, callback);
+  }
+
   std::string generate(const std::string &prompt,
                        const GenerateOptions &opts = {}) {
-    auto guard = slot_guard();
-    return run_inference(guard.slot, prompt, opts, nullptr);
+    return complete(prompt, opts).text;
   }
 
   void generate(const std::string &prompt, const StreamCallback &callback) {
@@ -129,8 +224,7 @@ public:
 
   void generate(const std::string &prompt, const GenerateOptions &opts,
                 const StreamCallback &callback) {
-    auto guard = slot_guard();
-    run_inference(guard.slot, prompt, opts, callback);
+    complete(prompt, opts, callback);
   }
 
   std::vector<llama_token> tokenize(const std::string &text) const {
@@ -140,6 +234,12 @@ public:
 
   size_t token_count(const std::string &text) const {
     return tokenize(text).size();
+  }
+
+  // The prompt the model's chat template makes of the messages, ready for
+  // generate or token_count.
+  std::string format_chat(const std::vector<Message> &messages) const {
+    return apply_chat_template(messages);
   }
 
   inline ChatSession session(const std::string &system_prompt = "");
@@ -172,8 +272,7 @@ public:
 
   std::string chat(const std::vector<Message> &messages,
                    const GenerateOptions &opts = {}) {
-    auto formatted = apply_chat_template(messages);
-    return generate(formatted, opts);
+    return chat_complete(messages, opts).text;
   }
 
   void chat(const std::vector<Message> &messages,
@@ -183,8 +282,7 @@ public:
 
   void chat(const std::vector<Message> &messages, const GenerateOptions &opts,
             const StreamCallback &callback) {
-    auto formatted = apply_chat_template(messages);
-    generate(formatted, opts, callback);
+    chat_complete(messages, opts, callback);
   }
 
 private:
@@ -229,7 +327,7 @@ private:
       n = llama_tokenize(vocab, text.c_str(), text.size(), tokens.data(),
                           tokens.size(), true, true);
       if (n < 0) {
-        throw std::runtime_error("Failed to tokenize text");
+        throw Error("Failed to tokenize text");
       }
     }
     tokens.resize(static_cast<size_t>(n));
@@ -246,9 +344,15 @@ private:
   }
 
   std::string apply_chat_template(const std::vector<Message> &messages) const {
-    // Falls back to raw concatenation if the model has no chat template
+    // Falls back to raw concatenation if the model has no chat template, or
+    // throws when Options::strict_chat_template asks for that.
+    auto fallback = [&](const char *why) {
+      if (params_.strict_chat_template) { throw TemplateError(why); }
+      return concat_contents(messages);
+    };
+
     auto tmpl = llama_model_chat_template(model_.get(), nullptr);
-    if (!tmpl) { return concat_contents(messages); }
+    if (!tmpl) { return fallback("The model has no chat template"); }
 
     std::vector<llama_chat_message> chat_msgs;
     chat_msgs.reserve(messages.size());
@@ -258,24 +362,45 @@ private:
 
     auto len = llama_chat_apply_template(
         tmpl, chat_msgs.data(), chat_msgs.size(), true, nullptr, 0);
-    if (len < 0) { return concat_contents(messages); }
+    if (len < 0) { return fallback("The chat template is not one this library can apply"); }
 
     std::string formatted(static_cast<size_t>(len), '\0');
     auto written = llama_chat_apply_template(
         tmpl, chat_msgs.data(), chat_msgs.size(), true, formatted.data(),
         formatted.size());
-    if (written < 0) { return concat_contents(messages); }
+    if (written < 0) { return fallback("The chat template could not be applied"); }
     formatted.resize(static_cast<size_t>(written));
     return formatted;
   }
 
-  std::string run_inference(Slot &slot, const std::string &prompt,
-                            const GenerateOptions &opts,
-                            const StreamCallback &callback) {
-    llama_sampler_reset(slot.smpl.get());
+  Result run_inference(Slot &slot, const std::string &prompt,
+                       const GenerateOptions &opts,
+                       const StreamCallback &callback) {
+    // The sampler for this call: the slot's own, unless the call brings one.
+    llama_sampler_ptr own;
+    llama_sampler *smpl = slot.smpl.get();
+    if (opts.sampler_config || opts.temperature || opts.seed) {
+      own = llama_sampler_ptr{
+          llama_sampler_chain_init(llama_sampler_chain_default_params())};
+      if (opts.sampler_config) {
+        opts.sampler_config(own.get());
+      } else {
+        llama_sampler_chain_add(
+            own.get(), llama_sampler_init_temp(
+                           opts.temperature.value_or(params_.temperature)));
+        llama_sampler_chain_add(
+            own.get(),
+            llama_sampler_init_dist(opts.seed.value_or(LLAMA_DEFAULT_SEED)));
+      }
+      smpl = own.get();
+    }
+    llama_sampler_reset(smpl);
     auto vocab = llama_model_get_vocab(model_.get());
 
     auto tokens = tokenize_text(vocab, prompt);
+
+    Result result;
+    result.prompt_tokens = static_cast<int>(tokens.size());
 
     auto n_ctx = llama_n_ctx(slot.ctx.get());
     auto max_tokens = opts.max_tokens;
@@ -283,17 +408,19 @@ private:
       // -1 means generate until EOS or context limit
       max_tokens = static_cast<int>(n_ctx - tokens.size());
       if (max_tokens <= 0) {
-        throw std::runtime_error(
+        throw ContextOverflowError(
             "Prompt too long: " + std::to_string(tokens.size()) +
             " prompt tokens fills the entire context of " +
             std::to_string(n_ctx));
       }
     } else if (tokens.size() + max_tokens > n_ctx) {
-      throw std::runtime_error(
+      throw ContextOverflowError(
           "Prompt too long: " + std::to_string(tokens.size()) +
           " prompt tokens + " + std::to_string(max_tokens) +
           " max_tokens exceeds context size " + std::to_string(n_ctx));
     }
+
+    if (!opts.reuse_cache) { slot.cached_tokens.clear(); }
 
     // KV cache reuse: find common prefix with cached tokens
     size_t prefix_len = 0;
@@ -318,12 +445,14 @@ private:
                           static_cast<llama_pos>(prefix_len), -1);
     }
 
-    if (prefix_len < tokens.size()) {
-      if (llama_decode(
-              slot.ctx.get(),
-              llama_batch_get_one(tokens.data() + prefix_len,
-                                  tokens.size() - prefix_len))) {
-        throw std::runtime_error("llama_decode failed on prompt");
+    // A batch holds at most n_batch tokens; llama.cpp aborts on a longer one.
+    const size_t piece_size = std::max<size_t>(1, llama_n_batch(slot.ctx.get()));
+    for (size_t at = prefix_len; at < tokens.size(); at += piece_size) {
+      auto n = std::min(piece_size, tokens.size() - at);
+      if (llama_decode(slot.ctx.get(),
+                       llama_batch_get_one(tokens.data() + at,
+                                           static_cast<int32_t>(n)))) {
+        throw DecodeError("llama_decode failed on prompt");
       }
     }
     slot.cached_tokens = std::move(tokens);
@@ -333,16 +462,16 @@ private:
     if (has_grammar) {
       auto root =
           opts.grammar_root.empty() ? "root" : opts.grammar_root.c_str();
-      auto *smpl =
+      auto *grammar =
           llama_sampler_init_grammar(vocab, opts.grammar.c_str(), root);
-      auto n_samplers = llama_sampler_chain_n(slot.smpl.get());
+      auto n_samplers = llama_sampler_chain_n(smpl);
       std::vector<llama_sampler *> existing;
       for (int si = n_samplers - 1; si >= 0; --si) {
-        existing.push_back(llama_sampler_chain_remove(slot.smpl.get(), si));
+        existing.push_back(llama_sampler_chain_remove(smpl, si));
       }
-      llama_sampler_chain_add(slot.smpl.get(), smpl);
+      llama_sampler_chain_add(smpl, grammar);
       for (auto it = existing.rbegin(); it != existing.rend(); ++it) {
-        llama_sampler_chain_add(slot.smpl.get(), *it);
+        llama_sampler_chain_add(smpl, *it);
       }
     }
 
@@ -355,7 +484,7 @@ private:
           llama_sampler_free(removed);
         }
       }
-    } grammar_guard{slot.smpl.get(), has_grammar};
+    } grammar_guard{smpl, has_grammar};
 
     // Compute the max length among stop sequences for buffer management
     size_t max_stop_len = 0;
@@ -364,13 +493,21 @@ private:
     }
     bool has_stop = max_stop_len > 0;
 
-    std::string result;
+    // Text goes into the result, and to the callback when there is one.
+    auto emit = [&](std::string_view s) {
+      result.text.append(s);
+      return callback ? callback(s) : true;
+    };
+
     std::string pending;  // Buffer for partial stop-sequence matching
     std::string piece;
+    result.finish = FinishReason::length;  // unless something below ends it
     for (auto i = 0; i < max_tokens; i++) {
-      auto new_token =
-          llama_sampler_sample(slot.smpl.get(), slot.ctx.get(), -1);
-      if (llama_vocab_is_eog(vocab, new_token)) break;
+      auto new_token = llama_sampler_sample(smpl, slot.ctx.get(), -1);
+      if (llama_vocab_is_eog(vocab, new_token)) {
+        result.finish = FinishReason::end;
+        break;
+      }
 
       char buf[256];
       auto len =
@@ -381,6 +518,7 @@ private:
                                    piece.size(), 0, true);
       }
       if (len <= 0) continue;
+      result.completion_tokens++;
 
       std::string_view sv = (len <= static_cast<int>(sizeof(buf)))
                                  ? std::string_view(buf, static_cast<size_t>(len))
@@ -396,55 +534,48 @@ private:
           auto pos = pending.find(s);
           if (pos != std::string::npos) {
             // Emit text before the stop sequence
-            auto emit = std::string_view(pending.data(), pos);
-            if (callback) {
-              if (!emit.empty()) callback(emit);
-            } else {
-              result.append(emit);
-            }
+            auto before = std::string_view(pending.data(), pos);
+            if (!before.empty()) emit(before);
             found_stop = true;
             break;
           }
         }
-        if (found_stop) { pending.clear(); break; }
+        if (found_stop) {
+          pending.clear();
+          result.finish = FinishReason::stop;
+          break;
+        }
 
         // Flush confirmed-safe bytes that can't be part of a stop sequence
         if (pending.size() > max_stop_len) {
           auto safe = pending.size() - max_stop_len;
-          auto emit = std::string_view(pending.data(), safe);
-          if (callback) {
-            if (!callback(emit)) break;
-          } else {
-            result.append(emit);
+          auto flushed = std::string_view(pending.data(), safe);
+          if (!emit(flushed)) {
+            pending.clear();
+            result.finish = FinishReason::aborted;
+            break;
           }
           pending.erase(0, safe);
         }
-      } else {
-        if (callback) {
-          if (!callback(sv)) break;
-        } else {
-          result.append(sv);
-        }
+      } else if (!emit(sv)) {
+        result.finish = FinishReason::aborted;
+        break;
       }
 
       if (llama_decode(slot.ctx.get(), llama_batch_get_one(&new_token, 1))) {
-        throw std::runtime_error("llama_decode failed during generation");
+        throw DecodeError("llama_decode failed during generation");
       }
     }
 
     // Flush remaining pending buffer (no stop sequence matched)
-    if (!pending.empty()) {
-      if (callback) {
-        callback(pending);
-      } else {
-        result.append(pending);
-      }
-    }
+    if (!pending.empty()) { emit(pending); }
 
     return result;
   }
 
   Options params_;
+  int n_ctx_ = 0;
+  int n_batch_ = 0;
   llama_model_ptr model_;
   std::queue<Slot> slots_;
   std::mutex mutex_;
