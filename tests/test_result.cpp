@@ -236,6 +236,32 @@ TEST_CASE("options and handles", "[result][options]") {
     params.cpu_only = true;
     llamalib::Llama llm(model_path, params);
     REQUIRE(llm.complete("Say ok", fixed("ok")).text == "ok");
+    REQUIRE(llm.devices().empty());
+  }
+
+  SECTION("devices are the ones the model was given") {
+    // By default, llama.cpp's own pick, resolved before loading.
+    llamalib::Options params;
+    params.n_ctx = 512;
+    llamalib::Llama by_default(model_path, params);
+    REQUIRE(by_default.devices() == llamalib::detail::default_gpus());
+
+    // Given explicitly, exactly those (here the same list, which is every GPU
+    // this build can see: none on a CPU-only build).
+    params.devices = llamalib::detail::default_gpus();
+    llamalib::Llama explicit_list(model_path, params);
+    REQUIRE(explicit_list.devices() == params.devices);
+    REQUIRE(explicit_list.complete("Say ok", fixed("ok")).text == "ok");
+
+    // cpu_only wins over a list.
+    params.cpu_only = true;
+    llamalib::Llama cpu(model_path, params);
+    REQUIRE(cpu.devices().empty());
+
+    // A moved model keeps its list.
+    auto expected = by_default.devices();
+    llamalib::Llama moved(std::move(by_default));
+    REQUIRE(moved.devices() == expected);
   }
 
   SECTION("the model and the context size are offered") {

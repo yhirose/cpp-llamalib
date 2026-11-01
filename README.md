@@ -256,6 +256,7 @@ llamalib::Llama llm("model.gguf", opts);
 | `n_slots` | `int` | `1` | Number of concurrent generation slots |
 | `sampler_config` | `SamplerConfig` | `nullptr` | Custom sampler chain configuration callback |
 | `cpu_only` | `bool` | `false` | Leave the GPUs out of the devices the model may use |
+| `devices` | `std::vector<ggml_backend_dev_t>` | `{}` | The GPUs the model may use; empty = the ones llama.cpp would pick (every discrete GPU, or the integrated ones when there is none). `devices()` says which it got |
 | `strict_chat_template` | `bool` | `false` | Throw `TemplateError` when the chat template cannot be applied, instead of joining the messages' contents |
 | `n_batch` | `int` | `0` | Tokens decoded at a time (0 = llama.cpp's default); a longer prompt is decoded in pieces |
 
@@ -299,13 +300,16 @@ std::string format_chat(const std::vector<Message> &messages) const
 
 The prompt the model's chat template makes of the messages, ready for `generate`, `complete` or `token_count`.
 
-#### `model`, `n_ctx`, `n_batch`
+#### `model`, `n_ctx`, `n_batch`, `devices`
 
 ```cpp
 const llama_model *model() const
 int n_ctx() const    // the context size the model got, which may be rounded up from Options::n_ctx
 int n_batch() const  // tokens decoded at a time
+const std::vector<ggml_backend_dev_t> &devices() const  // the GPUs the model was given; empty = CPU only
 ```
+
+`devices()` is the list the model was loaded with: when `Options::devices` is empty the library resolves llama.cpp's own pick first and passes it, so the list is never a guess.
 
 The model is offered for what this library does not wrap. The contexts are not: each belongs to a slot that a running call holds.
 

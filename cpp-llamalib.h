@@ -30,6 +30,41 @@ inline void backend_init() {
 inline void backend_free() {
   if (backend_refcount().fetch_sub(1) == 1) { llama_backend_free(); }
 }
+
+// The GPUs llama.cpp gives a model when it is handed no device list
+// (llama_model_load_from_file_impl): every discrete GPU, one per device id and
+// none over RPC, or else the integrated GPUs of the first backend that has
+// any. Resolved here and passed explicitly, so Llama::devices() is the list
+// the model got rather than a guess at it.
+inline std::vector<ggml_backend_dev_t> default_gpus() {
+  std::vector<ggml_backend_dev_t> gpus, igpus;
+  for (size_t i = 0; i < ggml_backend_dev_count(); i++) {
+    auto dev = ggml_backend_dev_get(i);
+    auto reg = ggml_backend_dev_backend_reg(dev);
+    switch (ggml_backend_dev_type(dev)) {
+    case GGML_BACKEND_DEVICE_TYPE_GPU: {
+      if (std::string_view(ggml_backend_reg_name(reg)) == "RPC") { break; }
+      ggml_backend_dev_props props;
+      ggml_backend_dev_get_props(dev, &props);
+      auto same_id = [&](ggml_backend_dev_t d) {
+        ggml_backend_dev_props p;
+        ggml_backend_dev_get_props(d, &p);
+        return props.device_id && p.device_id &&
+               std::string_view(props.device_id) == p.device_id;
+      };
+      if (std::none_of(gpus.begin(), gpus.end(), same_id)) { gpus.push_back(dev); }
+      break;
+    }
+    case GGML_BACKEND_DEVICE_TYPE_IGPU:
+      if (igpus.empty() || reg == ggml_backend_dev_backend_reg(igpus.back())) {
+        igpus.push_back(dev);
+      }
+      break;
+    default: break;
+    }
+  }
+  return gpus.empty() ? igpus : gpus;
+}
 } // namespace detail
 
 // Everything this library throws is an Error, which is a std::runtime_error.
@@ -93,6 +128,10 @@ struct Options {
   SamplerConfig sampler_config = nullptr;
   // Leave the GPUs out of the devices the model may use.
   bool cpu_only = false;
+  // The GPUs the model may use, in order. Empty means the ones llama.cpp would
+  // pick by itself (every discrete GPU, or the integrated ones when there is
+  // none); either way Llama::devices() says which it got.
+  std::vector<ggml_backend_dev_t> devices;
   // Throw TemplateError when the chat template cannot be applied, instead of
   // joining the messages' contents as they are.
   bool strict_chat_template = false;
@@ -128,8 +167,12 @@ public:
     model_params.n_gpu_layers = params.n_gpu_layers;
     // A null-terminated list of the devices the model may use; the CPU is
     // always available, so an empty list keeps the model off the GPUs.
-    static ggml_backend_dev_t no_devices[1] = {nullptr};
-    if (params.cpu_only) { model_params.devices = no_devices; }
+    if (!params.cpu_only) {
+      devices_ = params.devices.empty() ? detail::default_gpus() : params.devices;
+    }
+    std::vector<ggml_backend_dev_t> device_list = devices_;
+    device_list.push_back(nullptr);
+    model_params.devices = device_list.data();
     model_ = llama_model_ptr{
         llama_model_load_from_file(model_path.c_str(), model_params)};
     if (!model_) { throw ModelLoadError("Failed to load model"); }
@@ -170,6 +213,7 @@ public:
       : params_(other.params_),
         n_ctx_(other.n_ctx_),
         n_batch_(other.n_batch_),
+        devices_(std::move(other.devices_)),
         model_(std::move(other.model_)),
         slots_(std::move(other.slots_)) {}
 
@@ -182,6 +226,7 @@ public:
       params_ = other.params_;
       n_ctx_ = other.n_ctx_;
       n_batch_ = other.n_batch_;
+      devices_ = std::move(other.devices_);
       model_ = std::move(other.model_);
       slots_ = std::move(other.slots_);
     }
@@ -198,6 +243,10 @@ public:
 
   // Tokens decoded at a time, as the context has it.
   int n_batch() const { return n_batch_; }
+
+  // The GPUs the model was given (Options::devices, or llama.cpp's own pick);
+  // empty when it runs on the CPU only.
+  const std::vector<ggml_backend_dev_t> &devices() const { return devices_; }
 
   // The text, and how the generation ended. With a callback, the text is
   // streamed to it as well.
@@ -576,6 +625,7 @@ private:
   Options params_;
   int n_ctx_ = 0;
   int n_batch_ = 0;
+  std::vector<ggml_backend_dev_t> devices_;
   llama_model_ptr model_;
   std::queue<Slot> slots_;
   std::mutex mutex_;
