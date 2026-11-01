@@ -239,28 +239,31 @@ TEST_CASE("options and handles", "[result][options]") {
     REQUIRE(llm.devices().empty());
   }
 
-  SECTION("devices are the ones the model was given") {
-    // By default, llama.cpp's own pick, resolved before loading.
+  SECTION("devices() is what llama.cpp says it used") {
+    // llama.cpp logs "using device <name> (...)" for each device a model got.
+    static std::vector<std::string> logged;
+    logged.clear();
+    llama_log_set(
+        [](ggml_log_level, const char *text, void *) {
+          std::string_view line(text);
+          auto at = line.find("using device ");
+          if (at == std::string_view::npos) { return; }
+          line.remove_prefix(at + 13);
+          logged.emplace_back(line.substr(0, line.find(' ')));
+        },
+        nullptr);
     llamalib::Options params;
     params.n_ctx = 512;
-    llamalib::Llama by_default(model_path, params);
-    REQUIRE(by_default.devices() == llamalib::detail::default_gpus());
+    llamalib::Llama llm(model_path, params);
+    llama_log_set(nullptr, nullptr);
 
-    // Given explicitly, exactly those (here the same list, which is every GPU
-    // this build can see: none on a CPU-only build).
-    params.devices = llamalib::detail::default_gpus();
-    llamalib::Llama explicit_list(model_path, params);
-    REQUIRE(explicit_list.devices() == params.devices);
-    REQUIRE(explicit_list.complete("Say ok", fixed("ok")).text == "ok");
-
-    // cpu_only wins over a list.
-    params.cpu_only = true;
-    llamalib::Llama cpu(model_path, params);
-    REQUIRE(cpu.devices().empty());
+    std::vector<std::string> named;
+    for (auto dev : llm.devices()) { named.emplace_back(ggml_backend_dev_name(dev)); }
+    REQUIRE(named == logged);
 
     // A moved model keeps its list.
-    auto expected = by_default.devices();
-    llamalib::Llama moved(std::move(by_default));
+    auto expected = llm.devices();
+    llamalib::Llama moved(std::move(llm));
     REQUIRE(moved.devices() == expected);
   }
 

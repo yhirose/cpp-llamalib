@@ -31,11 +31,9 @@ inline void backend_free() {
   if (backend_refcount().fetch_sub(1) == 1) { llama_backend_free(); }
 }
 
-// The GPUs llama.cpp gives a model when it is handed no device list
-// (llama_model_load_from_file_impl): every discrete GPU, one per device id and
-// none over RPC, or else the integrated GPUs of the first backend that has
-// any. Resolved here and passed explicitly, so Llama::devices() is the list
-// the model got rather than a guess at it.
+// llama.cpp's pick for a model given no device list (llama_model_load_from_file_impl):
+// every discrete GPU, one per device id, else the integrated GPUs of the first
+// backend that has any. RPC servers, which it would put first, are left out.
 inline std::vector<ggml_backend_dev_t> default_gpus() {
   std::vector<ggml_backend_dev_t> gpus, igpus;
   for (size_t i = 0; i < ggml_backend_dev_count(); i++) {
