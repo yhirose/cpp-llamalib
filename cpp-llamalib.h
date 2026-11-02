@@ -1,3 +1,10 @@
+//
+//  cpp-llamalib.h
+//
+//  Copyright (c) 2026 Yuji Hirose. All rights reserved.
+//  MIT License
+//
+
 #ifndef CPP_LLAMALIB_H
 #define CPP_LLAMALIB_H
 
