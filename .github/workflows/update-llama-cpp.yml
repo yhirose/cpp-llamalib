@@ -78,3 +78,12 @@ jobs:
           gh pr merge ${{ steps.pr.outputs.pull-request-number }} --squash --delete-branch
           sleep 5
           git push origin --delete update-llama-cpp-${{ steps.check.outputs.latest }} || true
+
+      - name: Tag merged commit
+        if: steps.check.outputs.needs_update == 'true' && steps.build.outputs.result == 'pass' && steps.pr.outputs.pull-request-number
+        run: |
+          git fetch origin main
+          git checkout --force --detach FETCH_HEAD
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          ./scripts/tag-llama-cpp-version.sh

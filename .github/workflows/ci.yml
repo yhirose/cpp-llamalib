@@ -55,3 +55,22 @@ jobs:
 
       - name: Build
         run: cmake --build build --config Release -j4
+
+  # Tags pushes to main, e.g. a hand-made llama.cpp bump. The auto-merge in
+  # update-llama-cpp.yml pushes with GITHUB_TOKEN, which doesn't trigger this
+  # workflow, so that workflow tags its own merges.
+  tag:
+    if: github.event_name == 'push'
+    needs: [test, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag llama.cpp version
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          ./scripts/tag-llama-cpp-version.sh
