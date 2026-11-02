@@ -21,9 +21,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          latest=$(gh api repos/ggml-org/llama.cpp/releases/latest --jq '.tag_name' | tr -d '\n\r')
-          latest_date=$(gh api repos/ggml-org/llama.cpp/releases/latest --jq '.published_at[:10]' | tr -d '\n\r')
-          current=$(grep -oP 'GIT_TAG\s+\K\S+' CMakeLists.txt | head -1 | tr -d '\n\r')
+          release=$(./scripts/llama-cpp-version.sh latest)
+          read -r latest latest_date <<<"$release"
+          current=$(./scripts/llama-cpp-version.sh)
           echo "latest=$latest" >> "$GITHUB_OUTPUT"
           echo "latest_date=$latest_date" >> "$GITHUB_OUTPUT"
           echo "current=$current" >> "$GITHUB_OUTPUT"
@@ -33,9 +33,7 @@ jobs:
 
       - name: Update version references
         if: steps.check.outputs.needs_update == 'true'
-        run: |
-          sed -i "0,/GIT_TAG\s\+\S\+/s//GIT_TAG        ${{ steps.check.outputs.latest }}/" CMakeLists.txt
-          sed -i "s|llama.cpp \[.*\](https://github.com/ggml-org/llama.cpp/releases/tag/[^)]*), [0-9-]*\.|llama.cpp [${{ steps.check.outputs.latest }}](https://github.com/ggml-org/llama.cpp/releases/tag/${{ steps.check.outputs.latest }}), ${{ steps.check.outputs.latest_date }}.|" README.md
+        run: ./scripts/llama-cpp-version.sh set "${{ steps.check.outputs.latest }}" "${{ steps.check.outputs.latest_date }}"
 
       - name: Cache model
         if: steps.check.outputs.needs_update == 'true'

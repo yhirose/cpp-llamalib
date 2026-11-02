@@ -51,11 +51,12 @@ endif()
 
 include(FetchContent)
 
-# Fetch llama.cpp
+# Fetch llama.cpp (scripts/llama-cpp-version.sh reads and updates this line)
+set(LLAMA_CPP_VERSION v0.8.0)
 FetchContent_Declare(
   llama_cpp
   GIT_REPOSITORY https://github.com/ggml-org/llama.cpp.git
-  GIT_TAG        v0.8.0
+  GIT_TAG        ${LLAMA_CPP_VERSION}
   GIT_SHALLOW    TRUE
 )
 set(LLAMA_BUILD_TESTS OFF CACHE BOOL "" FORCE)
