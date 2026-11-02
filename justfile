@@ -1,6 +1,6 @@
 build:
     cmake -B build
-    cmake --build build -j$(sysctl -n hw.ncpu)
+    cmake --build build -j{{num_cpus()}}
 
 test: build
     ctest --test-dir build --output-on-failure
