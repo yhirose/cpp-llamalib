@@ -230,12 +230,43 @@ TEST_CASE("errors have kinds", "[result][errors]") {
 }
 
 TEST_CASE("options and handles", "[result][options]") {
-  SECTION("cpu_only still generates") {
+  SECTION("an empty device list keeps the model on the CPU, and still generates") {
     llamalib::Options params;
     params.n_ctx = 512;
-    params.cpu_only = true;
+    params.devices = std::vector<ggml_backend_dev_t>{};
     llamalib::Llama llm(model_path, params);
     REQUIRE(llm.complete("Say ok", fixed("ok")).text == "ok");
+    REQUIRE(llm.devices().empty());
+  }
+
+  SECTION("default_gpus() is the pick llama.cpp makes when it is given no list") {
+    // The library always passes a list, so this loads through llama.cpp
+    // directly, with none, and reads its "using device <name> (...)" lines: a
+    // change to llama.cpp's own rule shows here. Without a GPU both are empty.
+    static constexpr std::string_view prefix = "using device ";
+    static std::vector<std::string> logged;
+    logged.clear();
+    llama_log_set(
+        [](ggml_log_level, const char *text, void *) {
+          std::string_view line(text);
+          auto at = line.find(prefix);
+          if (at == std::string_view::npos) { return; }
+          line.remove_prefix(at + prefix.size());
+          logged.emplace_back(line.substr(0, line.find(' ')));
+        },
+        nullptr);
+    llamalib::detail::backend_init();
+    auto *model = llama_model_load_from_file(model_path, llama_model_default_params());
+    llama_log_set(nullptr, nullptr);
+    REQUIRE(model != nullptr);
+    llama_model_free(model);
+
+    std::vector<std::string> named;
+    for (auto dev : llamalib::detail::default_gpus()) {
+      named.emplace_back(ggml_backend_dev_name(dev));
+    }
+    llamalib::detail::backend_free();
+    REQUIRE(named == logged);
   }
 
   SECTION("the model and the context size are offered") {
@@ -250,9 +281,15 @@ TEST_CASE("options and handles", "[result][options]") {
     params.n_batch = 32;
     llamalib::Llama llm(model_path, params);
     REQUIRE(llm.n_batch() == 32);
+
+    // Unset devices resolve to llama.cpp's pick, and a moved model keeps them.
+    auto expected = llamalib::detail::default_gpus();
+    REQUIRE(llm.devices() == expected);
+    llamalib::Llama moved(std::move(llm));
+    REQUIRE(moved.devices() == expected);
   }
 
-  // Not covered here: cpu_only leaves the same text on a CPU-only build, and
+  // Not covered here: an empty device list leaves the same text on a CPU-only build, and
   // strict_chat_template only matters for a model whose template cannot be
   // applied; neither has anything to show with this model and build.
 
