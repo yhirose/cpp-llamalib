@@ -31,34 +31,30 @@ inline void backend_free() {
   if (backend_refcount().fetch_sub(1) == 1) { llama_backend_free(); }
 }
 
-// llama.cpp's pick for a model given no device list (llama_model_load_from_file_impl):
-// every discrete GPU, one per device id, else the integrated GPUs of the first
-// backend that has any. RPC servers, which it would put first, are left out.
+// llama.cpp's pick for a model given no device list (llama_model_load_from_file_impl;
+// no public call returns it, so it is copied here and the tests compare it with
+// what llama.cpp logs): every discrete GPU, one per device id, else the
+// integrated GPUs of the first backend that has any. RPC servers, which it
+// would put first, are left out.
 inline std::vector<ggml_backend_dev_t> default_gpus() {
   std::vector<ggml_backend_dev_t> gpus, igpus;
+  std::vector<std::string> ids;  // gpus' device ids, "" when a device has none
   for (size_t i = 0; i < ggml_backend_dev_count(); i++) {
     auto dev = ggml_backend_dev_get(i);
     auto reg = ggml_backend_dev_backend_reg(dev);
-    switch (ggml_backend_dev_type(dev)) {
-    case GGML_BACKEND_DEVICE_TYPE_GPU: {
-      if (std::string_view(ggml_backend_reg_name(reg)) == "RPC") { break; }
+    auto type = ggml_backend_dev_type(dev);
+    if (type == GGML_BACKEND_DEVICE_TYPE_GPU) {
+      if (std::string_view(ggml_backend_reg_name(reg)) == "RPC") { continue; }
       ggml_backend_dev_props props;
       ggml_backend_dev_get_props(dev, &props);
-      auto same_id = [&](ggml_backend_dev_t d) {
-        ggml_backend_dev_props p;
-        ggml_backend_dev_get_props(d, &p);
-        return props.device_id && p.device_id &&
-               std::string_view(props.device_id) == p.device_id;
-      };
-      if (std::none_of(gpus.begin(), gpus.end(), same_id)) { gpus.push_back(dev); }
-      break;
-    }
-    case GGML_BACKEND_DEVICE_TYPE_IGPU:
-      if (igpus.empty() || reg == ggml_backend_dev_backend_reg(igpus.back())) {
-        igpus.push_back(dev);
+      std::string id = props.device_id ? props.device_id : "";
+      if (id.empty() || std::find(ids.begin(), ids.end(), id) == ids.end()) {
+        gpus.push_back(dev);
+        ids.push_back(std::move(id));
       }
-      break;
-    default: break;
+    } else if (type == GGML_BACKEND_DEVICE_TYPE_IGPU &&
+               (igpus.empty() || reg == ggml_backend_dev_backend_reg(igpus.back()))) {
+      igpus.push_back(dev);
     }
   }
   return gpus.empty() ? igpus : gpus;
@@ -124,12 +120,9 @@ struct Options {
   float temperature = 0.3f;
   int n_slots = 1;
   SamplerConfig sampler_config = nullptr;
-  // Leave the GPUs out of the devices the model may use.
-  bool cpu_only = false;
-  // The GPUs the model may use, in order. Empty means the ones llama.cpp would
-  // pick by itself (every discrete GPU, or the integrated ones when there is
-  // none); either way Llama::devices() says which it got.
-  std::vector<ggml_backend_dev_t> devices;
+  // The GPUs the model may use, in order; an empty list keeps it on the CPU.
+  // Unset, the ones llama.cpp would pick by itself (see Llama::devices()).
+  std::optional<std::vector<ggml_backend_dev_t>> devices;
   // Throw TemplateError when the chat template cannot be applied, instead of
   // joining the messages' contents as they are.
   bool strict_chat_template = false;
@@ -165,9 +158,7 @@ public:
     model_params.n_gpu_layers = params.n_gpu_layers;
     // A null-terminated list of the devices the model may use; the CPU is
     // always available, so an empty list keeps the model off the GPUs.
-    if (!params.cpu_only) {
-      devices_ = params.devices.empty() ? detail::default_gpus() : params.devices;
-    }
+    devices_ = params.devices ? *params.devices : detail::default_gpus();
     std::vector<ggml_backend_dev_t> device_list = devices_;
     device_list.push_back(nullptr);
     model_params.devices = device_list.data();
@@ -242,8 +233,8 @@ public:
   // Tokens decoded at a time, as the context has it.
   int n_batch() const { return n_batch_; }
 
-  // The GPUs the model was given (Options::devices, or llama.cpp's own pick);
-  // empty when it runs on the CPU only.
+  // The GPUs the model was given (Options::devices, or llama.cpp's own pick
+  // resolved before the load, so never a guess); empty when it is on the CPU only.
   const std::vector<ggml_backend_dev_t> &devices() const { return devices_; }
 
   // The text, and how the generation ended. With a callback, the text is
