@@ -11,16 +11,16 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Cache model
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: build/models
           key: model-gemma-3-1b-it-Q4_K_M
 
       - name: Cache dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: build/_deps
           key: deps-native-off-${{ hashFiles('CMakeLists.txt') }}
@@ -42,10 +42,10 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Cache dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: build/_deps
           key: deps-${{ matrix.os }}-${{ hashFiles('CMakeLists.txt') }}
@@ -67,7 +67,7 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Tag llama.cpp version
         run: |
