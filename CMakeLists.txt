@@ -52,7 +52,7 @@ endif()
 include(FetchContent)
 
 # Fetch llama.cpp (scripts/llama-cpp-version.sh reads and updates this line)
-set(LLAMA_CPP_VERSION v0.8.0)
+set(LLAMA_CPP_VERSION v0.9.0)
 FetchContent_Declare(
   llama_cpp
   GIT_REPOSITORY https://github.com/ggml-org/llama.cpp.git
